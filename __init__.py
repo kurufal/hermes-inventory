@@ -253,7 +253,9 @@ def register(ctx):
 		"inventory",
 		PLUGIN_ROOT / "skills" / "inventory" / "SKILL.md",
 		description=(
-			"Guidance for ingesting photographed physical items into HomeBox."
+			"Routing for physical-item inventory/HomeBox requests. Load this skill "
+			"for phrases such as 'add this to my inventory', 'inventory this', "
+			"'catalog this', 'record this item', or 'add the thing I just uploaded'."
 		),
 	)
 
