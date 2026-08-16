@@ -6,7 +6,12 @@
 
 2. Configure `HOMEBOX_URL` and `HOMEBOX_API_KEY` in the Hermes runtime environment.
 
-3. Run `hermes model`, then configure the **Inventory vision** auxiliary task. For a local OpenAI-compatible endpoint, set `auxiliary.hermes_inventory_vision.base_url`, `.api_key`, `.model`, and `.timeout` in Hermes' `config.yaml`. Hermes owns these routing settings; do not put them in the plugin source.
+3. The plugin includes the tested **Inventory vision** route for
+   `qwen3-vl:8b-instruct-q8_0` at `http://192.168.1.160:30068/v1` with the
+   `ollama` key. If this deployment uses a different endpoint or model, run
+   `hermes model` and override `auxiliary.hermes_inventory_vision.base_url`,
+   `.api_key`, `.model`, and `.timeout` in Hermes' `config.yaml`. Hermes
+   operator configuration takes precedence over the plugin defaults.
 
 4. Validate the installed plugin with `hermes plugins doctor <plugin-path> --ci`.
 

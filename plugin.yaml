@@ -1,5 +1,5 @@
 name: hermes-inventory
-version: "0.1.1"
+version: "0.1.2"
 description: Add photographed physical items to a HomeBox inventory.
 manifest_version: 1
 provides_tools: [inventory_ingest]

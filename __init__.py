@@ -35,6 +35,18 @@ SUPPORTED_IMAGES = {
 	".bmp",
 }
 
+# These are plugin defaults, not hard overrides. Hermes operator configuration
+# under auxiliary.hermes_inventory_vision takes precedence when present. The
+# defaults match the local Qwen3-VL deployment used by this installation while
+# still allowing the host to select another provider, model, or endpoint.
+VISION_TASK_DEFAULTS = {
+	"provider": "custom",
+	"model": "qwen3-vl:8b-instruct-q8_0",
+	"base_url": "http://192.168.1.160:30068/v1",
+	"api_key": "ollama",
+	"timeout": 600,
+}
+
 
 def _json_error(message: str, **extra) -> str:
 	payload = {
@@ -208,7 +220,7 @@ def register(ctx):
 			"Analyze photographs of one physical inventory item."
 		),
 		defaults={
-			"timeout": 600,
+			**VISION_TASK_DEFAULTS,
 		},
 	)
 

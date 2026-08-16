@@ -90,22 +90,24 @@ hard-coding an entity-type UUID.
 
 ### Model configuration belongs to Hermes
 
-The plugin deliberately does **not** accept `VISION_MODEL`,
-`OLLAMA_CHAT_URL`, provider, model, endpoint, credential, or fallback settings.
-It registers the `hermes_inventory_vision` auxiliary task and uses the public
-`ctx.llm.complete_structured()` API without provider or model overrides.
+The plugin deliberately does **not** use direct model HTTP calls or accept
+legacy `VISION_MODEL` or `OLLAMA_CHAT_URL` settings. It registers the
+`hermes_inventory_vision` auxiliary task and uses the public
+`ctx.llm.complete_structured()` API. This repository includes tested defaults
+for the local Qwen3-VL deployment used by the target installation; Hermes
+operator configuration still takes precedence and remains the correct place
+to change provider, model, endpoint, credentials, or fallback behavior.
 
 Configure that task in Hermes through `hermes model` → **Configure auxiliary
-models**. With the default `provider: auto`, Hermes uses the active main model
-and its normal fallback behavior. Operators can instead configure
+models**. The checked-in defaults route to the target installation's
+Qwen3-VL endpoint. Operators can instead configure
 `auxiliary.hermes_inventory_vision` in Hermes' `config.yaml` to select a
-vision-capable provider, model, endpoint, credentials, timeout, or fallback
-chain. Those choices belong to the Hermes deployment and are never stored by
-this plugin.
+different provider, model, endpoint, credentials, timeout, or fallback chain;
+Hermes applies that operator configuration over the plugin defaults.
 
-For a local OpenAI-compatible vision endpoint, add a deployment-specific block
-to Hermes' `config.yaml` (commonly `$HERMES_HOME/config.yaml`), then restart
-Hermes:
+For a different local OpenAI-compatible vision endpoint, add or override a
+deployment-specific block in Hermes' `config.yaml` (commonly
+`$HERMES_HOME/config.yaml`), then restart Hermes:
 
 ```yaml
 auxiliary:
@@ -116,9 +118,12 @@ auxiliary:
     timeout: 600
 ```
 
-`base_url` makes Hermes call that endpoint directly, instead of resolving
-`provider: auto` to the main chat model. Do not add an installation-specific
-endpoint, model name, or API key to the plugin's `register()` defaults.
+`base_url` makes Hermes call that endpoint directly, instead of resolving the
+main chat model. The checked-in defaults are intentionally tied to the
+deployment that this repository serves (`192.168.1.160:30068` and
+`qwen3-vl:8b-instruct-q8_0`). Forks or public distributions should replace
+those defaults with host configuration rather than publishing private network
+details.
 
 ## Runtime data
 
@@ -252,8 +257,9 @@ Suggested regression checks are:
 - Keep `HOMEBOX_API_KEY` only in runtime environment configuration.
 - Do not put keys, bearer tokens, or authorization headers in logs, receipts,
   tool results, examples, or Git history.
-- Configure model providers, endpoints, credentials, and fallbacks only in
-	Hermes' model and auxiliary-task configuration, not in this plugin.
+- Configure deployment-specific model providers, endpoints, credentials, and
+	fallbacks in Hermes' model and auxiliary-task configuration. Do not replace
+	the checked-in `ollama` placeholder with a real secret in a public fork.
 - The plugin refuses image paths outside `HERMES_HOME` and copies accepted files
   into a unique staging directory before ingestion.
 - Original source files are copied rather than modified in place.
