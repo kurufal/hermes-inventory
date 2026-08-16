@@ -103,6 +103,23 @@ vision-capable provider, model, endpoint, credentials, timeout, or fallback
 chain. Those choices belong to the Hermes deployment and are never stored by
 this plugin.
 
+For a local OpenAI-compatible vision endpoint, add a deployment-specific block
+to Hermes' `config.yaml` (commonly `$HERMES_HOME/config.yaml`), then restart
+Hermes:
+
+```yaml
+auxiliary:
+  hermes_inventory_vision:
+    base_url: "http://VISION-HOST:PORT/v1"
+    api_key: "local-endpoint-key"
+    model: "your-vision-model"
+    timeout: 600
+```
+
+`base_url` makes Hermes call that endpoint directly, instead of resolving
+`provider: auto` to the main chat model. Do not add an installation-specific
+endpoint, model name, or API key to the plugin's `register()` defaults.
+
 ## Runtime data
 
 The plugin never stores runtime inventory evidence in its Git checkout. These

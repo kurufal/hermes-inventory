@@ -6,7 +6,7 @@
 
 2. Configure `HOMEBOX_URL` and `HOMEBOX_API_KEY` in the Hermes runtime environment.
 
-3. Run `hermes model`, then configure the **Inventory vision** auxiliary task. Hermes owns the provider, model, endpoint, credentials, timeout, and fallback settings for this task.
+3. Run `hermes model`, then configure the **Inventory vision** auxiliary task. For a local OpenAI-compatible endpoint, set `auxiliary.hermes_inventory_vision.base_url`, `.api_key`, `.model`, and `.timeout` in Hermes' `config.yaml`. Hermes owns these routing settings; do not put them in the plugin source.
 
 4. Validate the installed plugin with `hermes plugins doctor <plugin-path> --ci`.
 
