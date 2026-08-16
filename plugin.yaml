@@ -1,10 +1,6 @@
 name: hermes-inventory
 version: "0.1.5"
-description: >-
-	Authoritative physical-item inventory and HomeBox action. Use when the user
-	says add this to my inventory, inventory this, catalog this, record this item,
-	add this to HomeBox, put this in HomeBox, or
-	"add the thing I just uploaded".
+description: "Add photographed physical items to a HomeBox inventory."
 manifest_version: 1
 provides_tools: [inventory_ingest]
 requires_env: [HOMEBOX_URL, HOMEBOX_API_KEY]
