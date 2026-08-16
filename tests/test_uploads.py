@@ -81,10 +81,110 @@ class PendingUploadTests(unittest.TestCase):
 	def test_malformed_dashboard_filename_uses_detected_time(self):
 		path = self.add_image("dashboard_not-a-timestamp.png")
 
-		self.assertEqual(self.observe(), 1)
+		# No filename timestamp is available, so the event timestamp falls
+		# back to the file's real filesystem mtime — use the real clock as
+		# "now" so that fallback age check passes regardless of the fixed
+		# synthetic self.now used elsewhere in this test class.
+		self.assertEqual(self.observe(now=time.time()), 1)
 		image = self.read_state()["batches"][0]["images"][0]
 		self.assertIsNone(image["dashboard_timestamp"])
 		self.assertEqual(image["path"], str(path.resolve()))
+
+	def test_only_recent_dashboard_image_becomes_pending_when_state_absent(self):
+		# TEST 1: several hours-old dashboard images already sit in the images
+		# directory with no prior state at all. Only the recent one should
+		# become a pending upload; the stale ones must never be resurrected
+		# merely because there was no record of them yet.
+		self.add_image("dashboard_20260816_020000_old1.jpg")
+		self.add_image("dashboard_20260816_030000_old2.jpg")
+		recent = self.add_image("dashboard_20260816_084058_recent.jpg")
+
+		self.assertFalse(self.state.exists())
+		recorded = self.observe(now=self.now)
+
+		self.assertEqual(recorded, 1)
+		batches = self.read_state()["batches"]
+		self.assertEqual(len(batches), 1)
+		self.assertEqual(
+			[image["path"] for image in batches[0]["images"]],
+			[str(recent.resolve())],
+		)
+
+	def test_same_scan_candidates_far_apart_are_not_grouped(self):
+		# TEST 2: two unrecorded files discovered in the SAME observe() call
+		# whose filename timestamps differ by 30 minutes must not be merged
+		# into one batch, even though they were discovered simultaneously.
+		first = self.add_image("dashboard_20260816_081100_a.jpg")
+		second = self.add_image("dashboard_20260816_084100_b.jpg")
+
+		recorded = self.observe(now=self.now, ttl_seconds=3600)
+
+		self.assertEqual(recorded, 2)
+		batches = self.read_state()["batches"]
+		self.assertEqual(len(batches), 2)
+		image_groups = sorted(
+			tuple(image["path"] for image in batch["images"])
+			for batch in batches
+		)
+		self.assertEqual(
+			image_groups,
+			sorted([(str(first.resolve()),), (str(second.resolve()),)]),
+		)
+
+	def test_same_scan_candidates_close_together_are_grouped(self):
+		# TEST 3: two unrecorded files discovered in the SAME observe() call
+		# whose filename timestamps differ by 4 seconds must be grouped into
+		# one batch.
+		first = self.add_image("dashboard_20260816_084056_a.jpg")
+		second = self.add_image("dashboard_20260816_084100_b.jpg")
+
+		recorded = self.observe(now=self.now)
+
+		self.assertEqual(recorded, 2)
+		batches = self.read_state()["batches"]
+		self.assertEqual(len(batches), 1)
+		self.assertEqual(
+			[image["path"] for image in batches[0]["images"]],
+			[str(first.resolve()), str(second.resolve())],
+		)
+
+	def test_pruned_old_file_is_not_resurrected_as_pending(self):
+		# TEST 4: an old file's consumed state record is pruned by retention,
+		# but the physical file still exists in images_dir. A later observe()
+		# call must not treat it as a new upload.
+		old_path = self.add_image("dashboard_20260816_020000_old.jpg")
+		old_record_time = self.now - 90000
+		self.state.write_text(
+			json.dumps(
+				{
+					"version": 1,
+					"batches": [
+						{
+							"batch_id": "old-consumed",
+							"created_at": uploads._iso(old_record_time),
+							"updated_at": uploads._iso(old_record_time),
+							"expires_at": uploads._iso(old_record_time),
+							"status": "consumed",
+							"images": [
+								{
+									"path": str(old_path.resolve()),
+									"detected_at": uploads._iso(old_record_time),
+									"dashboard_timestamp": "2026-08-16T02:00:00Z",
+									"mtime": old_record_time,
+									"size": old_path.stat().st_size,
+								}
+							],
+						},
+					],
+				}
+			),
+			encoding="utf-8",
+		)
+
+		recorded = self.observe(now=self.now)
+
+		self.assertEqual(recorded, 0)
+		self.assertEqual(self.read_state()["batches"], [])
 
 	def test_multiple_uploads_within_batch_window_form_one_batch(self):
 		first = self.add_image("dashboard_20260816_084100_front.jpg")
@@ -120,9 +220,9 @@ class PendingUploadTests(unittest.TestCase):
 		self.observe(now=self.now)
 		new_first = self.add_image("dashboard_20260816_084120_front.jpg")
 		new_second = self.add_image("dashboard_20260816_084122_label.jpg")
-		self.observe(now=self.now + 20)
+		self.observe(now=self.now + 22)
 
-		batch = self.resolve_batch(now=self.now + 20)
+		batch = self.resolve_batch(now=self.now + 22)
 		self.assertEqual(
 			list(batch.image_paths),
 			[new_first.resolve(), new_second.resolve()],

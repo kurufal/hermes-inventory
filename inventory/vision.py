@@ -1,11 +1,15 @@
 """Host-routed vision analysis for a directory of one item's photographs."""
 
 import json
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from inventory.config import METADATA_DIR
+
+
+_LOGGER = logging.getLogger("hermes_plugins.hermes_inventory.vision")
 
 
 VISION_TASK = "hermes_inventory_vision"
@@ -217,6 +221,15 @@ def analyze_directory(
 		+ "\n\nThe supplied images are in this exact order:\n"
 		+ filename_list
 		+ "\n\nUse these exact filenames in source_images and image_roles."
+	)
+
+	_LOGGER.info(
+		"Vision request: item_id=%s image_count=%d images=%s sizes=%s task=%s",
+		item_dir.name,
+		len(images),
+		[image.name for image in images],
+		[image.stat().st_size for image in images],
+		task,
 	)
 
 	response = vision_client.complete_structured(

@@ -166,6 +166,39 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn('"candidate_count": 0', result)
 		self.assertIn('"total_batch_count": 2', result)
 
+	def test_vision_parse_failure_surfaces_structured_diagnostics(self):
+		def failing_ingest(stage_directory, vision_client):
+			del stage_directory, vision_client
+			error = RuntimeError("Vision model did not return valid structured JSON")
+			error.debug = {
+				"error_stage": "vision_json_parse",
+				"provider": "test-provider",
+				"model": "test-vision-model",
+				"content_type": "text/plain",
+				"metadata_path": "/opt/data/inventory/metadata/INV-test.json",
+				"input_image_count": 1,
+				"input_image_filenames": ["front.jpg"],
+				"raw_response_preview": "not valid json",
+			}
+			raise error
+
+		with patch.object(self.plugin, "HERMES_HOME", self.root), patch.object(
+			self.plugin,
+			"STAGING_ROOT",
+			self.root / "staging",
+		), patch.object(
+			self.plugin,
+			"_load_inventory_ingest",
+			return_value=failing_ingest,
+		):
+			result = self.plugin.inventory_ingest([str(self.explicit)], "fake-llm")
+
+		self.assertIn('"status": "error"', result)
+		self.assertIn('"error_stage": "vision_json_parse"', result)
+		self.assertIn('"provider": "test-provider"', result)
+		self.assertIn('"input_image_count": 1', result)
+		self.assertIn('"raw_response_preview": "not valid json"', result)
+
 	def test_registered_schema_has_optional_pending_mode(self):
 		registrations = {}
 

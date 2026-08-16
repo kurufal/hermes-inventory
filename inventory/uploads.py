@@ -259,6 +259,47 @@ def _is_stable(path: Path, delay_seconds: float = _STABILITY_DELAY_SECONDS) -> b
 	)
 
 
+def _event_timestamp(path: Path) -> float:
+	"""Return the best-known real-world timestamp this file was uploaded at.
+
+	Prefers the timestamp encoded in a ``dashboard_YYYYMMDD_HHMMSS_...``
+	filename; falls back to filesystem mtime. This is the timestamp used for
+	TTL/age acceptance and batch grouping — NOT ``time.time()`` at scan time,
+	which would treat every file discovered in one filesystem scan as
+	simultaneous regardless of how old it actually is.
+	"""
+	filename_time = _filename_timestamp(path)
+	if filename_time is not None:
+		return filename_time
+	try:
+		return path.stat().st_mtime
+	except OSError:
+		return float("-inf")
+
+
+def _batch_last_event_timestamp(batch: dict[str, Any]) -> float:
+	"""Return the most recent EVENT timestamp among a batch's recorded images."""
+	best = float("-inf")
+	for image in batch.get("images", []):
+		if not isinstance(image, dict):
+			continue
+		ts = None
+		dashboard_timestamp = image.get("dashboard_timestamp")
+		if dashboard_timestamp:
+			try:
+				ts = _timestamp(str(dashboard_timestamp))
+			except (TypeError, ValueError):
+				ts = None
+		if ts is None:
+			try:
+				ts = float(image.get("mtime"))
+			except (TypeError, ValueError):
+				ts = None
+		if ts is not None and ts > best:
+			best = ts
+	return best
+
+
 def observe_dashboard_uploads(
 	*,
 	now: float | None = None,
@@ -270,7 +311,16 @@ def observe_dashboard_uploads(
 	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
 	logger: logging.Logger = _LOGGER,
 ) -> int:
-	"""Record complete new dashboard images and return the number recorded."""
+	"""Record complete new, RECENT dashboard images and return the count recorded.
+
+	A file is only ever recorded as a new pending upload when its own event
+	timestamp (filename timestamp, else mtime) is within
+	``[0, ttl_seconds]`` of *now*. This prevents old files already sitting in
+	*images_dir* from being mistaken for new uploads merely because their
+	prior state record was pruned or never existed, and prevents multiple
+	unrelated historical uploads discovered in the same filesystem scan from
+	being merged into one batch.
+	"""
 
 	current = time.time() if now is None else now
 	try:
@@ -313,6 +363,16 @@ def observe_dashboard_uploads(
 		for path in candidates:
 			if not _is_stable(path, stability_delay_seconds):
 				continue
+
+			event_timestamp = _event_timestamp(path)
+			age = current - event_timestamp
+			if not (0 <= age <= ttl_seconds):
+				# Too old (or clock-skewed into the future) to be a genuine
+				# new upload. Never resurrect stale files as pending; leave
+				# them unrecorded so a legitimate recent upload elsewhere in
+				# the directory is still considered on its own merits.
+				continue
+
 			try:
 				detected_at = _iso(current)
 				record = _path_record(path, detected_at)
@@ -324,20 +384,29 @@ def observe_dashboard_uploads(
 				for batch in state["batches"]
 				if isinstance(batch, dict) and batch.get("status") == "pending"
 			]
-			batch = max(pending, key=_batch_updated_timestamp, default=None)
-			if batch is not None:
-				age = current - _batch_updated_timestamp(batch)
-			else:
-				age = float("inf")
 
-			if batch is not None and 0 <= age <= batch_window_seconds:
-				batch.setdefault("images", []).append(record)
-				batch["images"].sort(key=_record_sort_key)
-				batch["updated_at"] = detected_at
-				batch["expires_at"] = _iso(current + ttl_seconds)
-				logger.info("Added dashboard image to pending batch %s", batch.get("batch_id"))
+			target_batch = None
+			target_last_event = float("-inf")
+			for candidate_batch in pending:
+				last_event = _batch_last_event_timestamp(candidate_batch)
+				if last_event == float("-inf"):
+					continue
+				if abs(event_timestamp - last_event) <= batch_window_seconds:
+					if target_batch is None or last_event > target_last_event:
+						target_batch = candidate_batch
+						target_last_event = last_event
+
+			if target_batch is not None:
+				target_batch.setdefault("images", []).append(record)
+				target_batch["images"].sort(key=_record_sort_key)
+				target_batch["updated_at"] = detected_at
+				target_batch["expires_at"] = _iso(current + ttl_seconds)
+				logger.info(
+					"Added dashboard image to pending batch %s",
+					target_batch.get("batch_id"),
+				)
 			else:
-				batch = {
+				target_batch = {
 					"batch_id": f"{datetime.fromtimestamp(current, UTC).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}",
 					"created_at": detected_at,
 					"updated_at": detected_at,
@@ -345,8 +414,11 @@ def observe_dashboard_uploads(
 					"status": "pending",
 					"images": [record],
 				}
-				state["batches"].append(batch)
-				logger.info("Created pending dashboard upload batch %s", batch["batch_id"])
+				state["batches"].append(target_batch)
+				logger.info(
+					"Created pending dashboard upload batch %s",
+					target_batch["batch_id"],
+				)
 			recorded_paths.add(str(path))
 			new_count += 1
 			changed = True

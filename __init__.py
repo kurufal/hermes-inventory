@@ -234,6 +234,9 @@ def inventory_ingest(
 		return json.dumps(result, indent=2)
 
 	except Exception as exc:
+		debug = getattr(exc, "debug", None)
+		if isinstance(debug, dict) and debug:
+			return _json_error(str(exc), **debug)
 		return _json_error(
 			f"Inventory ingestion failed: {type(exc).__name__}: {exc}"
 		)

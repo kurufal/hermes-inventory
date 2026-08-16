@@ -17,6 +17,17 @@ from inventory.normalize import normalize_record
 from inventory.vision import analyze_directory
 
 
+class VisionParseError(RuntimeError):
+	"""Raised when the vision backend does not return parseable structured JSON.
+
+	Carries a ``.debug`` dict with non-secret diagnostic context (provider,
+	model, source image names, a bounded raw response preview, and the
+	metadata file path) so the caller can report something more useful than
+	a bare "vision failed" message, and so the chat model is not left to
+	invent unfounded explanations such as poor image quality.
+	"""
+
+
 SUPPORTED_IMAGES = {
 	".jpg",
 	".jpeg",
@@ -119,10 +130,35 @@ def run_vision(item_directory, vision_client):
 		raw.get("parse_status")
 		!= "json_ok"
 	):
-		raise RuntimeError(
-			"Vision model did not return "
-			"valid structured JSON"
+		llm_info = raw.get("llm")
+		if not isinstance(llm_info, dict):
+			llm_info = {}
+		audit = llm_info.get("audit")
+		if not isinstance(audit, dict):
+			audit = {}
+		result_payload = raw.get("result")
+		if not isinstance(result_payload, dict):
+			result_payload = {}
+		source_images = raw.get("source_images")
+		if not isinstance(source_images, list):
+			source_images = []
+
+		error = VisionParseError(
+			"Vision model did not return valid structured JSON"
 		)
+		error.debug = {
+			"error_stage": "vision_json_parse",
+			"provider": llm_info.get("provider", ""),
+			"model": llm_info.get("model", ""),
+			"content_type": audit.get("content_type", ""),
+			"metadata_path": str(metadata_path),
+			"input_image_count": len(source_images),
+			"input_image_filenames": list(source_images),
+			"raw_response_preview": str(
+				result_payload.get("raw_model_output", "")
+			)[:1000],
+		}
+		raise error
 
 	return (
 		raw,
