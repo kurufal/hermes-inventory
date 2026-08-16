@@ -11,6 +11,17 @@ import sys
 import uuid
 from pathlib import Path
 
+# Hermes imports this file as a submodule of its own plugin package and does
+# not add the plugin's own directory to sys.path. Every module in this
+# repository imports its sibling "inventory" package with an absolute import
+# (from inventory.xxx import yyy), which only resolves when this directory is
+# itself importable as a top-level package location. Prepend it explicitly so
+# loading works both under Hermes' plugin loader and under a plain test
+# runner, without switching every file to relative imports.
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+if _PLUGIN_DIR not in sys.path:
+	sys.path.insert(0, _PLUGIN_DIR)
+
 from inventory.config import HERMES_HOME, INVENTORY_BASE_DIR
 from inventory.uploads import (
 	PendingUploadError,

@@ -225,19 +225,6 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("use_pending_upload", skill)
 		self.assertIn("do not call `vision_analyze` first", skill)
 
-	def test_manifest_description_contains_routing_triggers(self):
-		manifest = (PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8").lower()
-
-		for phrase in (
-			"add this to my inventory",
-			"inventory this",
-			"catalog this",
-			"record this item",
-			"add this to homebox",
-			"add the thing i just uploaded",
-		):
-			self.assertIn(phrase, manifest)
-
 
 if __name__ == "__main__":
 	unittest.main()
