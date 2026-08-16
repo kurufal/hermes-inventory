@@ -13,9 +13,11 @@ from pathlib import Path
 
 from inventory.config import HERMES_HOME, INVENTORY_BASE_DIR
 from inventory.uploads import (
-	RecentDashboardUploadError,
-	mark_dashboard_uploads_consumed,
-	resolve_recent_dashboard_uploads,
+	PendingUploadError,
+	mark_pending_upload_consumed,
+	resolve_pending_upload_batch,
+	release_pending_upload_claim,
+	start_pending_upload_watcher,
 )
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -136,27 +138,31 @@ def _stage_images(image_paths):
 
 
 def inventory_ingest(
-	image_paths,
-	vision_client,
-	recent_dashboard_upload=False,
+	image_paths=None,
+	vision_client=None,
+	use_pending_upload=False,
 ):
 	"""Ingest one physical item represented by attached photographs."""
 
-	using_recent_dashboard_upload = not image_paths and recent_dashboard_upload is True
-	if using_recent_dashboard_upload:
+	pending_batch = None
+	using_pending_upload = not image_paths and use_pending_upload is True
+	if using_pending_upload:
 		try:
-			image_paths = resolve_recent_dashboard_uploads()
-		except RecentDashboardUploadError as exc:
+			pending_batch = resolve_pending_upload_batch(claim=True)
+			image_paths = [str(path) for path in pending_batch.image_paths]
+		except PendingUploadError as exc:
 			return _json_error(str(exc))
 	elif not image_paths:
 		return _json_error(
 			"No image paths were supplied. Provide image_paths or set "
-			"recent_dashboard_upload to true."
+			"use_pending_upload to true."
 		)
 
 	try:
 		images = _normalize_image_paths(image_paths)
 	except Exception as exc:
+		if pending_batch is not None:
+			release_pending_upload_claim(pending_batch.batch_id)
 		return _json_error(str(exc))
 
 	stage_dir = None
@@ -164,11 +170,11 @@ def inventory_ingest(
 	try:
 		ingest = _load_inventory_ingest()
 		stage_dir = _stage_images(images)
-		if using_recent_dashboard_upload:
+		if pending_batch is not None:
 			# Staging succeeded, so the upload has been accepted for processing.
 			# Mark it before vision/HomeBox work so an EXACT_DUPLICATE and a
 			# later processing failure cannot cause accidental reuse.
-			mark_dashboard_uploads_consumed(images)
+			mark_pending_upload_consumed(pending_batch.batch_id)
 
 		result = ingest(
 			str(stage_dir),
@@ -218,6 +224,8 @@ def inventory_ingest(
 		)
 
 	finally:
+		if pending_batch is not None:
+			release_pending_upload_claim(pending_batch.batch_id)
 		if stage_dir is not None:
 			shutil.rmtree(stage_dir, ignore_errors=True)
 
@@ -228,6 +236,7 @@ def register(ctx):
 	import logging
 
 	logger = logging.getLogger("hermes_plugins.hermes_inventory")
+	start_pending_upload_watcher(logger=logger)
 
 	ctx.register_auxiliary_task(
 		"hermes_inventory_vision",
@@ -256,8 +265,8 @@ def register(ctx):
 				"local image path shown in the current message's attachment references "
 				"in image_paths. If the user just uploaded or pasted an image but Hermes "
 				"did not expose an explicit path, call this tool with "
-				"recent_dashboard_upload=true. Multiple recent dashboard uploads from "
-				"one short burst may be views of the same physical item and are passed "
+				"use_pending_upload=true. Multiple images in the newest pending batch "
+				"may be views of the same physical item and are passed "
 				"together. Do not ask the user to reattach solely because the path is "
 				"unavailable. "
 			"The tool performs its own vision analysis, identifier extraction, "
@@ -284,12 +293,12 @@ def register(ctx):
 						"exactly as Hermes supplied them."
 					),
 				},
-				"recent_dashboard_upload": {
+				"use_pending_upload": {
 					"type": "boolean",
 					"default": False,
 					"description": (
-						"When true and image_paths is omitted, resolve an unconsumed "
-						"dashboard image upload from the recent upload window."
+						"Use the newest unexpired pending Hermes dashboard upload batch "
+						"when explicit image_paths are unavailable."
 					),
 				},
 			},
@@ -307,8 +316,8 @@ def register(ctx):
 		return inventory_ingest(
 			params.get("image_paths", []),
 			ctx.llm,
-			recent_dashboard_upload=params.get(
-				"recent_dashboard_upload",
+			use_pending_upload=params.get(
+				"use_pending_upload",
 				False,
 			),
 		)
@@ -324,7 +333,7 @@ def register(ctx):
 		],
 		description=(
 			"Add attached photographs of a physical item to HomeBox inventory; "
-			"use recent_dashboard_upload when a dashboard upload has no exposed path."
+			"use the use_pending_upload option when a dashboard upload has no exposed path."
 		),
 		emoji="📦",
 	)

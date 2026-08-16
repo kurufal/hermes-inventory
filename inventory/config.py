@@ -1,5 +1,6 @@
 """Environment-backed configuration for the inventory backend."""
 
+import math
 import os
 from pathlib import Path
 
@@ -19,20 +20,32 @@ INVENTORY_BASE_DIR = Path(
 ).expanduser().resolve()
 
 DASHBOARD_IMAGES_DIR = HERMES_HOME / "images"
-DASHBOARD_UPLOAD_WINDOW_SECONDS = int(
-	os.environ.get(
-		"INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS",
-		"120",
-	)
+
+
+def _non_negative_float(name: str, default: float) -> float:
+	try:
+		value = float(os.environ.get(name, str(default)))
+	except (TypeError, ValueError):
+		return default
+	return value if math.isfinite(value) and value >= 0 else default
+
+
+PENDING_UPLOAD_STATE_PATH = INVENTORY_BASE_DIR / "pending-uploads.json"
+UPLOAD_WATCH_INTERVAL_SECONDS = _non_negative_float(
+	"INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS",
+	1.0,
 )
-DASHBOARD_BURST_SECONDS = int(
-	os.environ.get(
-		"INVENTORY_DASHBOARD_BURST_SECONDS",
-		"10",
-	)
+UPLOAD_BATCH_WINDOW_SECONDS = _non_negative_float(
+	"INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS",
+	10.0,
 )
-DASHBOARD_UPLOAD_STATE_PATH = (
-	INVENTORY_BASE_DIR / "dashboard-upload-state.json"
+PENDING_UPLOAD_TTL_SECONDS = _non_negative_float(
+	"INVENTORY_PENDING_UPLOAD_TTL_SECONDS",
+	300.0,
+)
+UPLOAD_STATE_RETENTION_SECONDS = _non_negative_float(
+	"INVENTORY_UPLOAD_STATE_RETENTION_SECONDS",
+	86400.0,
 )
 
 # Backward-compatible name for callers that used the former backend module.

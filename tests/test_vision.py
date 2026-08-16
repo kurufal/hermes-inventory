@@ -44,6 +44,7 @@ class InventoryVisionTests(unittest.TestCase):
 					item_directory,
 					client,
 				)
+			self.assertTrue(metadata_path.is_file())
 
 		self.assertEqual(client.call["task"], VISION_TASK)
 		self.assertEqual(client.call["purpose"], "inventory.vision")
@@ -55,7 +56,6 @@ class InventoryVisionTests(unittest.TestCase):
 		self.assertEqual(record["parse_status"], "json_ok")
 		self.assertEqual(record["llm"]["provider"], "test-provider")
 		self.assertFalse("ollama_url" in record)
-		self.assertTrue(metadata_path.is_file())
 
 	def test_preserves_unparseable_model_output_for_audit(self):
 		response = SimpleNamespace(

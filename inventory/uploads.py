@@ -1,132 +1,147 @@
-"""Safe resolution and consumption tracking for dashboard image uploads."""
+"""Plugin-owned pending state for Hermes dashboard image uploads."""
 
 from __future__ import annotations
 
 import json
-import math
+import logging
 import os
 import re
 import tempfile
+import threading
 import time
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from inventory.config import (
-	DASHBOARD_BURST_SECONDS,
 	DASHBOARD_IMAGES_DIR,
-	DASHBOARD_UPLOAD_STATE_PATH,
-	DASHBOARD_UPLOAD_WINDOW_SECONDS,
+	PENDING_UPLOAD_STATE_PATH,
+	PENDING_UPLOAD_TTL_SECONDS,
+	UPLOAD_BATCH_WINDOW_SECONDS,
+	UPLOAD_STATE_RETENTION_SECONDS,
+	UPLOAD_WATCH_INTERVAL_SECONDS,
 )
 
 
+_LOGGER = logging.getLogger("hermes_plugins.hermes_inventory.uploads")
 _DASHBOARD_NAME_RE = re.compile(
-	r"^dashboard_(?P<date>\d{8})_(?P<time>\d{6})(?:_|$)"
+	r"^dashboard_(?P<date>\d{8})_(?P<time>\d{6})(?:_|\.|$)"
 )
 _SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-_STATE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_STATE_VERSION = 1
+_STABILITY_DELAY_SECONDS = 0.05
+
+_STATE_LOCK = threading.RLock()
+_WATCHER_LOCK = threading.Lock()
+_WATCHER_STOP = threading.Event()
+_WATCHER_THREAD: threading.Thread | None = None
+_CLAIMED_BATCHES: set[str] = set()
 
 
-class RecentDashboardUploadError(ValueError):
-	"""Raised when no safe recent dashboard upload can be resolved."""
+class PendingUploadError(ValueError):
+	"""Raised when pending upload state cannot provide a usable batch."""
+
+
+@dataclass(frozen=True)
+class PendingUploadBatch:
+	"""A validated pending batch ready for the existing ingest pipeline."""
+
+	batch_id: str
+	image_paths: tuple[Path, ...]
+	created_at: str
+	updated_at: str
+	expires_at: str
+
+
+def _utc_now(timestamp: float | None = None) -> datetime:
+	return datetime.fromtimestamp(
+		time.time() if timestamp is None else timestamp,
+		tz=UTC,
+	)
+
+
+def _iso(timestamp: float | None = None) -> str:
+	return _utc_now(timestamp).isoformat().replace("+00:00", "Z")
+
+
+def _timestamp(value: str) -> float:
+	return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
 
 def _filename_timestamp(path: Path) -> float | None:
+	"""Return the optional timestamp embedded in a dashboard filename."""
+
 	match = _DASHBOARD_NAME_RE.match(path.name)
 	if not match:
 		return None
-
 	try:
-		value = datetime.strptime(
+		return datetime.strptime(
 			f"{match.group('date')}_{match.group('time')}",
 			"%Y%m%d_%H%M%S",
-		).replace(tzinfo=UTC)
-		return value.timestamp()
+		).replace(tzinfo=UTC).timestamp()
 	except ValueError:
 		return None
 
 
-def _candidate_timestamp(path: Path) -> float:
-	"""Use the Hermes filename timestamp, with mtime as a safe fallback."""
-
-	timestamp = _filename_timestamp(path)
-	if timestamp is not None:
-		return timestamp
-
-	try:
-		mtime = path.stat().st_mtime
-	except OSError as exc:
-		raise RecentDashboardUploadError(
-			f"Could not determine upload time for {path.name}: {exc}"
-		) from exc
-
-	if mtime <= 0:
-		raise RecentDashboardUploadError(
-			f"Could not determine a valid upload time for {path.name}"
-		)
-	return mtime
+def _default_state() -> dict[str, Any]:
+	return {"version": _STATE_VERSION, "batches": []}
 
 
-def _read_state(path: Path, now: float) -> dict[str, float]:
+def _backup_corrupt_state(path: Path, logger: logging.Logger) -> None:
 	if not path.exists():
-		return {}
+		return
+	backup = path.with_name(
+		f"{path.name}.corrupt-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-"
+		f"{uuid.uuid4().hex[:8]}"
+	)
+	try:
+		os.replace(path, backup)
+		logger.warning("Recovered malformed upload state as %s", backup)
+	except OSError as exc:
+		logger.warning("Could not back up malformed upload state %s: %s", path, exc)
+
+
+def _read_state_locked(
+	state_path: Path,
+	logger: logging.Logger = _LOGGER,
+) -> dict[str, Any]:
+	if not state_path.exists():
+		return _default_state()
 
 	try:
-		payload = json.loads(path.read_text(encoding="utf-8"))
-	except (OSError, json.JSONDecodeError) as exc:
-		raise RecentDashboardUploadError(
-			f"Dashboard upload state is unreadable: {path}"
-		) from exc
-
-	if not isinstance(payload, dict) or "consumed" not in payload:
-		raise RecentDashboardUploadError(
-			f"Dashboard upload state is malformed: {path}"
-		)
-
-	consumed = payload["consumed"]
-	if not isinstance(consumed, dict):
-		raise RecentDashboardUploadError(
-			f"Dashboard upload state is malformed: {path}"
-		)
-
-	result: dict[str, float] = {}
-	cutoff = now - _STATE_RETENTION_SECONDS
-	for raw_path, raw_time in consumed.items():
-		if not isinstance(raw_path, str):
-			continue
-		try:
-			if isinstance(raw_time, str):
-				stamp = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-				value = stamp.timestamp()
-			else:
-				value = float(raw_time)
-		except (TypeError, ValueError, OverflowError):
-			continue
-		if math.isfinite(value) and value >= cutoff:
-			result[raw_path] = value
-	return result
+		payload = json.loads(state_path.read_text(encoding="utf-8"))
+		if (
+			not isinstance(payload, dict)
+			or payload.get("version") != _STATE_VERSION
+			or not isinstance(payload.get("batches"), list)
+		):
+			raise ValueError("unexpected state shape")
+		return payload
+	except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+		logger.warning("Malformed pending upload state %s: %s", state_path, exc)
+		_backup_corrupt_state(state_path, logger)
+		return _default_state()
 
 
-def _write_state(path: Path, consumed: dict[str, float], now: float) -> None:
-	path.parent.mkdir(parents=True, exist_ok=True)
-	cutoff = now - _STATE_RETENTION_SECONDS
-	payload = {
-		"consumed": {
-			raw_path: datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z")
-			for raw_path, value in consumed.items()
-			if value >= cutoff
-		}
-	}
-
+def _write_state_locked(state_path: Path, state: dict[str, Any]) -> None:
+	state_path.parent.mkdir(parents=True, exist_ok=True)
 	fd, temporary_name = tempfile.mkstemp(
-		prefix=f".{path.name}.",
+		prefix=f".{state_path.name}.",
 		suffix=".tmp",
-		dir=str(path.parent),
+		dir=str(state_path.parent),
 	)
 	try:
 		with os.fdopen(fd, "w", encoding="utf-8") as handle:
-			json.dump(payload, handle, indent=2, sort_keys=True)
+			json.dump(state, handle, indent=2, sort_keys=True)
 			handle.write("\n")
-		os.replace(temporary_name, path)
+			handle.flush()
+			try:
+				os.fsync(handle.fileno())
+			except OSError:
+				pass
+		os.replace(temporary_name, state_path)
 	except Exception:
 		try:
 			os.unlink(temporary_name)
@@ -135,93 +150,398 @@ def _write_state(path: Path, consumed: dict[str, float], now: float) -> None:
 		raise
 
 
-def mark_dashboard_uploads_consumed(
-	paths: list[Path],
+def _path_record(path: Path, detected_at: str) -> dict[str, Any]:
+	stat = path.stat()
+	dashboard_time = _filename_timestamp(path)
+	return {
+		"path": str(path.resolve()),
+		"detected_at": detected_at,
+		"dashboard_timestamp": _iso(dashboard_time) if dashboard_time is not None else None,
+		"mtime": stat.st_mtime,
+		"size": stat.st_size,
+	}
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[float, float, str]:
+	try:
+		primary = _timestamp(record.get("dashboard_timestamp") or record["detected_at"])
+	except (KeyError, TypeError, ValueError):
+		primary = float("inf")
+	try:
+		mtime = float(record.get("mtime", 0))
+	except (TypeError, ValueError):
+		mtime = 0
+	return primary, mtime, str(record.get("path", ""))
+
+
+def _batch_updated_timestamp(batch: dict[str, Any]) -> float:
+	try:
+		return _timestamp(str(batch["updated_at"]))
+	except (KeyError, TypeError, ValueError):
+		return 0.0
+
+
+def _expire_and_prune_locked(
+	state: dict[str, Any],
+	now: float,
 	*,
-	now: float | None = None,
-	state_path: Path = DASHBOARD_UPLOAD_STATE_PATH,
-) -> None:
-	"""Record uploads after they have been staged for inventory processing."""
+	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
+	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	logger: logging.Logger = _LOGGER,
+) -> bool:
+	changed = False
+	for batch in state["batches"]:
+		if not isinstance(batch, dict):
+			continue
+		if batch.get("status") == "pending":
+			try:
+				expires = _timestamp(str(batch["expires_at"]))
+			except (KeyError, TypeError, ValueError):
+				expires = _batch_updated_timestamp(batch) + ttl_seconds
+			new_expires = _iso(expires)
+			if batch.get("expires_at") != new_expires:
+				batch["expires_at"] = new_expires
+				changed = True
+			if now >= expires:
+				batch["status"] = "expired"
+				batch["updated_at"] = _iso(now)
+				changed = True
+				logger.info("Pending upload batch expired: %s", batch.get("batch_id"))
 
-	current = time.time() if now is None else now
-	state = _read_state(state_path, current)
-	for path in paths:
-		state[str(path.resolve())] = current
-	_write_state(state_path, state, current)
+	kept: list[dict[str, Any]] = []
+	for batch in state["batches"]:
+		if not isinstance(batch, dict):
+			changed = True
+			continue
+		if batch.get("status") == "pending":
+			kept.append(batch)
+			continue
+		if now - _batch_updated_timestamp(batch) <= retention_seconds:
+			kept.append(batch)
+		else:
+			changed = True
+	state["batches"] = kept
+	return changed
 
 
-def resolve_recent_dashboard_uploads(
+def _supported_dashboard_file(path: Path) -> bool:
+	return (
+		path.name.startswith("dashboard_")
+		and path.suffix.lower() in _SUPPORTED_IMAGES
+		and not path.is_symlink()
+		and path.is_file()
+	)
+
+
+def _detection_sort_key(path: Path) -> tuple[float, str]:
+	filename_time = _filename_timestamp(path)
+	if filename_time is not None:
+		return filename_time, str(path)
+	try:
+		return path.stat().st_mtime, str(path)
+	except OSError:
+		return float("inf"), str(path)
+
+
+def _is_stable(path: Path, delay_seconds: float = _STABILITY_DELAY_SECONDS) -> bool:
+	try:
+		first = path.stat()
+		if first.st_size <= 0:
+			return False
+		if delay_seconds > 0:
+			time.sleep(delay_seconds)
+		second = path.stat()
+	except OSError:
+		return False
+	return (
+		first.st_size == second.st_size
+		and first.st_mtime_ns == second.st_mtime_ns
+	)
+
+
+def observe_dashboard_uploads(
 	*,
 	now: float | None = None,
 	images_dir: Path = DASHBOARD_IMAGES_DIR,
-	state_path: Path = DASHBOARD_UPLOAD_STATE_PATH,
-	window_seconds: int = DASHBOARD_UPLOAD_WINDOW_SECONDS,
-	burst_seconds: int = DASHBOARD_BURST_SECONDS,
-) -> list[Path]:
-	"""Return the newest safe dashboard upload burst in chronological order.
-
-	Only direct children named ``dashboard_*`` with supported image extensions
-	are considered. The filename timestamp is preferred because it represents
-	the upload operation; filesystem mtime is used only for malformed names.
-	"""
+	state_path: Path = PENDING_UPLOAD_STATE_PATH,
+	batch_window_seconds: float = UPLOAD_BATCH_WINDOW_SECONDS,
+	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
+	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
+	logger: logging.Logger = _LOGGER,
+) -> int:
+	"""Record complete new dashboard images and return the number recorded."""
 
 	current = time.time() if now is None else now
-	if window_seconds < 0 or burst_seconds < 0:
-		raise RecentDashboardUploadError("Dashboard upload timing values must be non-negative")
-
 	try:
-		images_root = images_dir.resolve(strict=True)
-		if not images_root.is_dir():
-			raise NotADirectoryError(str(images_root))
-		entries = list(images_root.iterdir())
-	except FileNotFoundError as exc:
-		raise RecentDashboardUploadError(
-			f"No recent dashboard uploads found in {images_dir}"
-		) from exc
+		entries = list(images_dir.resolve(strict=True).iterdir())
+	except (FileNotFoundError, NotADirectoryError):
+		return 0
 	except OSError as exc:
-		raise RecentDashboardUploadError(
-			f"Could not inspect dashboard upload directory {images_dir}: {exc}"
-		) from exc
+		logger.warning("Could not inspect dashboard image directory %s: %s", images_dir, exc)
+		return 0
 
-	consumed = _read_state(state_path, current)
-	candidates: list[tuple[float, Path]] = []
-	for path in entries:
-		if (
-			path.is_symlink()
-			or not path.is_file()
-			or not path.name.startswith("dashboard_")
-			or path.suffix.lower() not in _SUPPORTED_IMAGES
-		):
-			continue
-
-		resolved = path.resolve()
-		if str(resolved) in consumed:
-			continue
-
-		try:
-			upload_time = _candidate_timestamp(path)
-		except RecentDashboardUploadError:
-			# A file with a malformed name can still be handled safely by mtime;
-			# an unavailable mtime is simply not a usable candidate.
-			continue
-
-		age = current - upload_time
-		if age < -5 or age > window_seconds:
-			continue
-		candidates.append((upload_time, resolved))
-
-	if not candidates:
-		raise RecentDashboardUploadError(
-			f"No unconsumed dashboard image uploaded within the last {window_seconds} seconds"
+	with _STATE_LOCK:
+		state_missing = not state_path.exists()
+		state = _read_state_locked(state_path, logger)
+		state_missing = state_missing or not state_path.exists()
+		changed = state_missing or _expire_and_prune_locked(
+			state,
+			current,
+			ttl_seconds=ttl_seconds,
+			retention_seconds=retention_seconds,
+			logger=logger,
 		)
+		recorded_paths = {
+			str(image.get("path"))
+			for batch in state["batches"]
+			if isinstance(batch, dict)
+			for image in batch.get("images", [])
+			if isinstance(image, dict)
+		}
 
-	candidates.sort(key=lambda item: (item[0], str(item[1])))
-	newest_time = candidates[-1][0]
-	burst = [
-		path
-		for upload_time, path in candidates
-		if newest_time - upload_time <= burst_seconds
-	]
-	if not burst:
-		raise RecentDashboardUploadError("Could not resolve a safe recent dashboard upload")
-	return burst
+		candidates = sorted(
+			(
+				path.resolve()
+				for path in entries
+				if _supported_dashboard_file(path)
+				and str(path.resolve()) not in recorded_paths
+			),
+			key=_detection_sort_key,
+		)
+		new_count = 0
+		for path in candidates:
+			if not _is_stable(path, stability_delay_seconds):
+				continue
+			try:
+				detected_at = _iso(current)
+				record = _path_record(path, detected_at)
+			except OSError:
+				continue
+
+			pending = [
+				batch
+				for batch in state["batches"]
+				if isinstance(batch, dict) and batch.get("status") == "pending"
+			]
+			batch = max(pending, key=_batch_updated_timestamp, default=None)
+			if batch is not None:
+				age = current - _batch_updated_timestamp(batch)
+			else:
+				age = float("inf")
+
+			if batch is not None and 0 <= age <= batch_window_seconds:
+				batch.setdefault("images", []).append(record)
+				batch["images"].sort(key=_record_sort_key)
+				batch["updated_at"] = detected_at
+				batch["expires_at"] = _iso(current + ttl_seconds)
+				logger.info("Added dashboard image to pending batch %s", batch.get("batch_id"))
+			else:
+				batch = {
+					"batch_id": f"{datetime.fromtimestamp(current, UTC).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}",
+					"created_at": detected_at,
+					"updated_at": detected_at,
+					"expires_at": _iso(current + ttl_seconds),
+					"status": "pending",
+					"images": [record],
+				}
+				state["batches"].append(batch)
+				logger.info("Created pending dashboard upload batch %s", batch["batch_id"])
+			recorded_paths.add(str(path))
+			new_count += 1
+			changed = True
+
+		if changed:
+			_write_state_locked(state_path, state)
+		return new_count
+
+
+def _batch_to_result(
+	batch: dict[str, Any],
+	images_dir: Path = DASHBOARD_IMAGES_DIR,
+) -> PendingUploadBatch:
+	images = batch.get("images", [])
+	images_root = images_dir.resolve()
+	paths: list[Path] = []
+	for image in images:
+		if not isinstance(image, dict) or not isinstance(image.get("path"), str):
+			raise PendingUploadError("Pending upload batch contains malformed image metadata")
+		raw_path = Path(image["path"])
+		path = raw_path.resolve()
+		if (
+			raw_path.is_symlink()
+			or not path.is_file()
+			or path.parent != images_root
+			or path.suffix.lower() not in _SUPPORTED_IMAGES
+			or not path.name.startswith("dashboard_")
+		):
+			raise PendingUploadError(
+				f"Pending dashboard image is missing or invalid: {path}"
+			)
+		paths.append(path)
+	if not paths:
+		raise PendingUploadError("Pending upload batch contains no images")
+	batch_id = str(batch.get("batch_id", "")).strip()
+	if not batch_id:
+		raise PendingUploadError("Pending upload batch has no batch ID")
+	return PendingUploadBatch(
+		batch_id=batch_id,
+		image_paths=tuple(paths),
+		created_at=str(batch.get("created_at", "")),
+		updated_at=str(batch.get("updated_at", "")),
+		expires_at=str(batch.get("expires_at", "")),
+	)
+
+
+def resolve_pending_upload_batch(
+	*,
+	now: float | None = None,
+	images_dir: Path = DASHBOARD_IMAGES_DIR,
+	state_path: Path = PENDING_UPLOAD_STATE_PATH,
+	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
+	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	claim: bool = False,
+	logger: logging.Logger = _LOGGER,
+) -> PendingUploadBatch:
+	"""Resolve the newest valid unexpired pending batch."""
+
+	current = time.time() if now is None else now
+	with _STATE_LOCK:
+		state_missing = not state_path.exists()
+		state = _read_state_locked(state_path, logger)
+		state_missing = state_missing or not state_path.exists()
+		changed = state_missing or _expire_and_prune_locked(
+			state,
+			current,
+			ttl_seconds=ttl_seconds,
+			retention_seconds=retention_seconds,
+			logger=logger,
+		)
+		if changed:
+			_write_state_locked(state_path, state)
+
+		pending = [
+			batch
+			for batch in state["batches"]
+			if isinstance(batch, dict)
+			and batch.get("status") == "pending"
+			and str(batch.get("batch_id", "")) not in _CLAIMED_BATCHES
+		]
+		pending.sort(key=_batch_updated_timestamp, reverse=True)
+		if not pending:
+			raise PendingUploadError("No recent pending dashboard upload was found.")
+
+		batch = pending[0]
+		try:
+			result = _batch_to_result(batch, images_dir)
+		except PendingUploadError:
+			batch["status"] = "expired"
+			batch["updated_at"] = _iso(current)
+			_write_state_locked(state_path, state)
+			raise
+		try:
+			expires_at = _timestamp(result.expires_at)
+		except (TypeError, ValueError):
+			expires_at = 0
+		if expires_at <= current:
+			batch["status"] = "expired"
+			batch["updated_at"] = _iso(current)
+			_write_state_locked(state_path, state)
+			raise PendingUploadError("No recent pending dashboard upload was found.")
+		if claim:
+			_CLAIMED_BATCHES.add(result.batch_id)
+		return result
+
+
+def mark_pending_upload_consumed(
+	batch_id: str,
+	*,
+	state_path: Path = PENDING_UPLOAD_STATE_PATH,
+	logger: logging.Logger = _LOGGER,
+) -> None:
+	"""Mark a staged pending batch consumed, including duplicate outcomes."""
+
+	with _STATE_LOCK:
+		state = _read_state_locked(state_path, logger)
+		for batch in state["batches"]:
+			if isinstance(batch, dict) and batch.get("batch_id") == batch_id:
+				if batch.get("status") == "pending":
+					batch["status"] = "consumed"
+					batch["updated_at"] = _iso()
+					_write_state_locked(state_path, state)
+					logger.info("Pending upload batch consumed: %s", batch_id)
+					_CLAIMED_BATCHES.discard(batch_id)
+					return
+				raise PendingUploadError(
+					f"Pending upload batch is not pending: {batch_id}"
+				)
+		raise PendingUploadError(f"Pending upload batch not found: {batch_id}")
+
+
+def release_pending_upload_claim(batch_id: str) -> None:
+	with _STATE_LOCK:
+		_CLAIMED_BATCHES.discard(batch_id)
+
+
+def _watcher_loop(
+	stop_event: threading.Event,
+	interval_seconds: float,
+	logger: logging.Logger,
+) -> None:
+	while not stop_event.is_set():
+		try:
+			observe_dashboard_uploads(logger=logger)
+		except Exception:
+			logger.exception("Pending upload watcher exception")
+		stop_event.wait(max(interval_seconds, 0.05))
+
+
+def start_pending_upload_watcher(
+	*,
+	logger: logging.Logger = _LOGGER,
+	interval_seconds: float = UPLOAD_WATCH_INTERVAL_SECONDS,
+) -> bool:
+	"""Start the one process-local daemon watcher, if not already active."""
+
+	global _WATCHER_THREAD
+	with _WATCHER_LOCK:
+		if _WATCHER_THREAD is not None and _WATCHER_THREAD.is_alive():
+			logger.info("Pending upload watcher already active")
+			return False
+		_WATCHER_STOP.clear()
+		_WATCHER_THREAD = threading.Thread(
+			target=_watcher_loop,
+			args=(_WATCHER_STOP, interval_seconds, logger),
+			name="hermes-inventory-upload-watcher",
+			daemon=True,
+		)
+		_WATCHER_THREAD.start()
+		logger.info("Pending upload watcher started")
+		return True
+
+
+def stop_pending_upload_watcher() -> None:
+	"""Signal the daemon watcher to stop; intended for tests and process teardown."""
+
+	_WATCHER_STOP.set()
+# End of module.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

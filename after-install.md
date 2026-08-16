@@ -15,4 +15,12 @@
 
 4. Validate the installed plugin with `hermes plugins doctor <plugin-path> --ci`.
 
+5. The plugin watches `$HERMES_HOME/images` for complete `dashboard_` image
+   files and stores pending batches in
+   `$INVENTORY_BASE_DIR/pending-uploads.json`. Optional settings are
+   `INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS` (default `1`),
+   `INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS` (default `10`),
+   `INVENTORY_PENDING_UPLOAD_TTL_SECONDS` (default `300`), and
+   `INVENTORY_UPLOAD_STATE_RETENTION_SECONDS` (default `86400`).
+
 See README.md for storage paths, duplicate behavior, and the required HomeBox API endpoints.

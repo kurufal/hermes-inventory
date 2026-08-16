@@ -75,9 +75,11 @@ export HOMEBOX_URL="http://homebox.example.internal"
 export HOMEBOX_API_KEY="replace-with-a-secret-from-your-runtime"
 export INVENTORY_BASE_DIR="/opt/data/inventory"
 export HERMES_HOME="/opt/data"
-# Optional dashboard-upload fallback tuning
-export INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS="120"
-export INVENTORY_DASHBOARD_BURST_SECONDS="10"
+# Optional pending-upload tuning
+export INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS="1"
+export INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS="10"
+export INVENTORY_PENDING_UPLOAD_TTL_SECONDS="300"
+export INVENTORY_UPLOAD_STATE_RETENTION_SECONDS="86400"
 ```
 
 | Variable | Required | Purpose |
@@ -86,8 +88,10 @@ export INVENTORY_DASHBOARD_BURST_SECONDS="10"
 | `HOMEBOX_API_KEY` | Yes | Bearer token used for HomeBox API requests. |
 | `INVENTORY_BASE_DIR` | No | Persistent data root. Defaults to `/opt/data/inventory`. |
 | `HERMES_HOME` | No | Root that tool image paths must remain beneath. Defaults to `/opt/data`. |
-| `INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS` | No | How recent a dashboard upload must be for fallback resolution. Defaults to `120`. |
-| `INVENTORY_DASHBOARD_BURST_SECONDS` | No | Maximum timestamp gap for grouping recent dashboard views. Defaults to `10`. |
+| `INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS` | No | Polling interval for the plugin-owned dashboard watcher. Defaults to `1`. |
+| `INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS` | No | Maximum detection gap for grouping dashboard photos into one batch. Defaults to `10`. |
+| `INVENTORY_PENDING_UPLOAD_TTL_SECONDS` | No | Pending batch lifetime. Defaults to `300` seconds. |
+| `INVENTORY_UPLOAD_STATE_RETENTION_SECONDS` | No | How long consumed and expired records remain for audit/debugging. Defaults to `86400` seconds. |
 
 `HOMEBOX_URL` intentionally has no installation-specific default. The code
 discovers HomeBox's non-location `Item` entity type at runtime rather than
@@ -141,7 +145,7 @@ directories are created as needed below `INVENTORY_BASE_DIR`:
 ├── metadata/        # raw structured model response by inventory ID
 ├── receipts/        # auditable ingest outcomes, including duplicate attempts
 ├── tool-staging/    # temporary copied Hermes attachments, removed per call
-└── dashboard-upload-state.json  # consumed fallback-upload paths, pruned
+└── pending-uploads.json  # pending, consumed, and expired dashboard batches
 ```
 
 Plugin upgrades must preserve these paths. The original photographs remain the
@@ -153,22 +157,31 @@ The plugin registers `inventory_ingest` in the `inventory` toolset. Its
 preferred input is an `image_paths` array of one or more local image paths. All
 paths represent one physical item and are staged together before processing.
 
-For stock Hermes dashboard behavior, the tool also accepts
-`recent_dashboard_upload: true` when no explicit path is available. The
-fallback inspects only direct children of `HERMES_HOME/images` whose names begin
-with `dashboard_` and whose extensions are supported. It uses the timestamp in
-the Hermes filename when available, rejects files older than the configured
-short window, and groups files from the newest upload burst in chronological
-order. Files selected by the fallback are recorded in
-`INVENTORY_BASE_DIR/dashboard-upload-state.json` and are not selected again.
+When the plugin registers, it starts one daemon polling watcher. The watcher
+observes only direct children of `HERMES_HOME/images` whose names begin with
+`dashboard_` and whose extensions are supported. It waits for a stable file size
+before recording an image in the plugin-owned
+`INVENTORY_BASE_DIR/pending-uploads.json` state file. No user-message intent
+tracking is performed.
 
-Explicit `image_paths` always take priority and remain the safest option. The
-fallback is intended primarily for a single-user or local Hermes deployment.
-The filesystem directory does not contain session identity, so a small
-theoretical race remains possible if multiple sessions upload images at the
-same time. The plugin never scans arbitrary directories, recursively searches
-for images, or chooses an arbitrary newest file outside the dashboard naming
-and time rules.
+The watcher groups images detected within the batch window into one pending
+batch, preserves chronological image order, and expires unconsumed batches
+after the pending TTL. It stores the optional filename timestamp when parsing
+succeeds, plus `detected_at`, filesystem mtime, and size. Consumed and expired
+records are retained only for the configured retention period.
+
+Explicit `image_paths` always take priority and remain the safest option. When
+the user asks to inventory an upload without an exposed path, Hermes should
+call `inventory_ingest` with `use_pending_upload: true`. The plugin resolves the
+newest valid unexpired pending batch and passes all of its paths through the
+existing staging, vision, duplicate, and HomeBox pipeline. A batch is marked
+consumed after staging, including `EXACT_DUPLICATE` and other accepted outcomes.
+
+This pending-upload discovery is intended primarily for a single-user or local
+Hermes deployment. The filesystem directory has no browser-session identity,
+so it cannot provide perfect isolation for simultaneous multi-session uploads.
+The plugin never scans arbitrary directories or recursively searches for
+images. Unrelated chat leaves pending state untouched until TTL expiration.
 
 The entry point accepts only regular files below `HERMES_HOME`, rejects
 unsupported extensions, resolves symlinks, and de-duplicates repeated paths.
@@ -287,20 +300,19 @@ Suggested regression checks are:
   into a unique staging directory before ingestion.
 - Original source files are copied rather than modified in place.
 
-## Stock dashboard upload fallback
+## Stock dashboard pending uploads
 
 Hermes dashboard uploads are normally written below `HERMES_HOME/images`, often
 with names such as `dashboard_20260816_031936_<token>.png`. If the dashboard
-renders the `/image` command but does not expose the exact path to the model,
-the inventory skill can call:
+does not expose the exact path to the model, the inventory skill can call:
 
 ```json
-{"recent_dashboard_upload": true}
+{"use_pending_upload": true}
 ```
 
-The plugin resolves a recent, unconsumed dashboard upload or short upload burst
-and sends the result through the same existing staging, vision, duplicate, and
-HomeBox pipeline. This is a plugin-only convenience fallback; it does not
-modify `/opt/hermes`, Hermes dashboard JavaScript, `/image`, `image.attach`,
-the CLI, the TUI, or the gateway. Explicit paths remain preferred because the
-filesystem-only fallback cannot provide perfect session isolation.
+The watcher has already recorded complete dashboard files as pending state, so
+the tool resolves a batch rather than guessing from the newest arbitrary image.
+This is entirely plugin-owned; it does not modify `/opt/hermes`, Hermes
+dashboard JavaScript, `/image`, `image.attach`, the CLI, the TUI, or the
+gateway. Explicit paths remain preferred because filesystem-only state cannot
+provide perfect browser-session identity.
