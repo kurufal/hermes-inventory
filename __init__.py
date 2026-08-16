@@ -260,23 +260,22 @@ def register(ctx):
 	schema = {
 		"name": "inventory_ingest",
 		"description": (
-				"Add a physical item to the user's local inventory from photographs "
-				"attached to the current user message. Prefer passing every relevant "
-				"local image path shown in the current message's attachment references "
-				"in image_paths. If the user just uploaded or pasted an image but Hermes "
-				"did not expose an explicit path, call this tool with "
-				"use_pending_upload=true. Multiple images in the newest pending batch "
-				"may be views of the same physical item and are passed "
-				"together. Do not ask the user to reattach solely because the path is "
-				"unavailable. "
-			"The tool performs its own vision analysis, identifier extraction, "
-			"duplicate checking, image preservation, and HomeBox update. When this "
-			"tool returns classification EXACT_DUPLICATE, no new HomeBox item was "
-			"created and no follow-up decision is required. Report the existing item "
-			"and do not offer confirm, overwrite, skip, merge, or numbered choices. "
-			"Do not speculate from image filenames. Do not run vision_analyze first "
-			"merely to identify the item. If the user asks to add, catalog, inventory, "
-			"or record the photographed physical item, use this tool."
+			"Authoritative action for physical-item inventory and HomeBox requests. "
+			"Use this tool whenever the user asks to add, inventory, catalog, record, "
+			"save, or put a photographed physical item into their inventory or HomeBox. "
+			"Direct triggers include: 'add this to my inventory', 'add this item to "
+			"HomeBox', 'inventory this', 'catalog this', 'record this item', 'put this "
+			"in HomeBox', and 'add the thing I just uploaded'. Do not ask what kind of "
+			"inventory the user means when this, item, thing, image, photo, or a recent "
+			"upload is the referent, and do not ask the user to identify the object first. "
+			"Prefer explicit image_paths when available. If paths are unavailable for a "
+			"recent dashboard upload, call this tool with use_pending_upload=true. "
+			"Multiple images in the newest pending batch may be views of one physical item. "
+			"Do not call vision_analyze first; this tool performs its own vision analysis, "
+			"identifier extraction, duplicate checking, image preservation, and HomeBox "
+			"update. When classification is EXACT_DUPLICATE, no new HomeBox item was "
+			"created and no follow-up decision is required: report the existing item and "
+			"do not offer confirm, overwrite, skip, merge, or numbered choices."
 		),
 		"parameters": {
 			"type": "object",
@@ -332,8 +331,12 @@ def register(ctx):
 			"HOMEBOX_API_KEY",
 		],
 		description=(
-			"Add attached photographs of a physical item to HomeBox inventory; "
-			"use the use_pending_upload option when a dashboard upload has no exposed path."
+			"Authoritative physical-item inventory/HomeBox action. Use for requests to "
+			"add, inventory, catalog, record, save, or put a photographed item into "
+			"inventory or HomeBox, including 'add this to my inventory', 'inventory this', "
+			"'catalog this', and 'add the thing I just uploaded'. Prefer image_paths; use "
+			"use_pending_upload=true when a recent dashboard upload has no exposed path. "
+			"Do not ask what kind of inventory the user means or call vision_analyze first."
 		),
 		emoji="📦",
 	)

@@ -1,44 +1,67 @@
-# Inventory ingestion
+# Inventory Routing
 
-Use the `inventory_ingest` tool when the user asks to add, catalog, inventory,
-or record a photographed physical item in HomeBox.
+When the user asks to add, inventory, catalog, record, save, or put a
+photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 
-## Tool-selection rules
+Treat these as direct inventory commands:
 
-- When the user asks to add, catalog, inventory, or record a physical item from
-	an image, use `inventory_ingest` directly. Do not call `vision_analyze` first
-	merely to identify the item.
-- If Hermes exposes explicit local image paths, pass them as `image_paths`.
-- If the user just uploaded or pasted an image but Hermes exposes no usable
-	path, call `inventory_ingest` with `use_pending_upload: true`. Do not ask
-	the user to upload the same image again solely because the path is missing.
-- Pass every relevant photograph of the item together in one `image_paths`
-	array. They are views of one physical item unless the user clearly says
-	otherwise.
-- Preserve attachment paths exactly as Hermes supplied them.
-- Do not infer a photograph's semantic role from its filename. The inventory
-	vision pipeline determines roles from image contents.
-- Multiple images in the newest pending dashboard batch are views of the same
-	physical item unless the user says otherwise.
-- If no pending upload exists, report that clearly instead of inventing an image
-	path.
+- “add this to my inventory”
+- “add this item to my inventory”
+- “inventory this”
+- “catalog this”
+- “record this item”
+- “add this to HomeBox”
+- “put this in HomeBox”
+- “add the thing I just uploaded”
 
-## Duplicate rules
+If “this”, “item”, “thing”, “image”, “photo”, “these images”, “these photos”,
+or “the uploaded item” refers to a recent upload, do not ask what kind of
+inventory the user means. Do not ask the user to identify the object first.
+This plugin means physical-item inventory; do not reinterpret the request as a
+task, note, reminder, bookmark, subscription, or digital resource unless the
+user explicitly says so.
 
-- If the tool returns `EXACT_DUPLICATE`, no user decision is required. Report
-	that the item is already in inventory using `existing_item` details when
-	available.
-- Never invent confirm, overwrite, skip, merge, or numbered-choice workflows.
-- A matching ISBN, UPC, EAN, model, or product name can identify the same
-	product without proving the same physical unit. Do not claim an ambiguous
-	match was merged or overwritten.
-- Do not silently merge uncertain duplicate candidates.
+Do not call `vision_analyze` first. `inventory_ingest` performs its own vision
+analysis.
 
-## Output rules
+## Choose the input
 
-- The tool performs image analysis, identifier extraction, duplicate checks,
-	original preservation, HomeBox updates, metadata writing, and receipts.
-- Summarize the structured tool result accurately. Do not speculate about
-	filenames or backend actions that the result does not report.
-- Report errors clearly and do not imply an item was added when `created` is
-	false.
+- If explicit local attachment paths exist, pass every relevant path in
+  `image_paths`, preserving the paths exactly.
+- If the user refers to a recent upload but no usable local path is exposed,
+  call `inventory_ingest` with:
+
+  ```json
+  {"use_pending_upload": true}
+  ```
+
+- Do not ask the user to upload the same image again merely because Hermes did
+  not expose its path.
+- Multiple images in the newest pending upload batch are views of one physical
+  item unless the user explicitly says otherwise.
+- If no pending upload exists, report that clearly instead of inventing a path.
+
+## Anti-clarification rule
+
+When the user combines an inventory verb (`add`, `inventory`, `catalog`,
+`record`, `save`, or `put`), an inventory/HomeBox destination, and a referent
+such as “this”, “this item”, “this thing”, “this image”, “these photos”, or
+“what I uploaded”, the correct action is `inventory_ingest`.
+
+Do not ask:
+
+- “What kind of inventory?”
+- “What physical item?”
+- “Is this a digital resource, task, or note?”
+- “What would you like to add?”
+
+Do not stop after `tool_search` or `tool_describe`; once `inventory_ingest` is
+found, invoke it. Do not route every occurrence of “add” to this tool: “add a
+reminder”, “add this sentence to my notes”, and “add this bookmark” are not
+physical inventory commands.
+
+## Duplicates and multiple images
+
+If the tool returns `EXACT_DUPLICATE`, no new HomeBox item was created and no
+user decision is required. Report the existing item using `existing_item` when
+available. Never offer confirm, overwrite, skip, merge, or numbered choices.

@@ -171,6 +171,60 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("use_pending_upload", properties)
 		self.assertNotIn("recent_dashboard_upload", properties)
 
+	def test_tool_description_contains_natural_language_routing_triggers(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_tool(self, **kwargs):
+				registrations.update(kwargs)
+				return {"registered": True}
+
+		with patch.object(self.plugin, "start_pending_upload_watcher"):
+			self.plugin.register(FakeContext())
+
+		description = registrations["schema"]["description"].lower()
+		for phrase in (
+			"add this to my inventory",
+			"add this item to homebox",
+			"inventory this",
+			"catalog this",
+			"record this item",
+			"put this in homebox",
+			"add the thing i just uploaded",
+		):
+			self.assertIn(phrase, description)
+		self.assertIn("do not ask what kind of inventory", description)
+		self.assertIn("do not call vision_analyze first", description)
+		self.assertIn("use_pending_upload=true", description)
+
+	def test_inventory_skill_is_a_concise_routing_skill(self):
+		skill = (
+			PLUGIN_ROOT / "skills" / "inventory" / "SKILL.md"
+		).read_text(encoding="utf-8").lower()
+
+		self.assertTrue(skill.startswith("# inventory routing"))
+		for phrase in (
+			"add this to my inventory",
+			"inventory this",
+			"catalog this",
+			"record this item",
+			"add this to homebox",
+			"put this in homebox",
+			"add the thing i just uploaded",
+		):
+			self.assertIn(phrase, skill)
+		self.assertIn("what kind of inventory?", skill)
+		self.assertIn("use_pending_upload", skill)
+		self.assertIn("do not call `vision_analyze` first", skill)
+
 
 if __name__ == "__main__":
 	unittest.main()
