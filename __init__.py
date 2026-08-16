@@ -277,24 +277,24 @@ def register(ctx):
 	schema = {
 		"name": "inventory_ingest",
 		"description": (
-			"Authoritative action for physical-item inventory and HomeBox requests. "
-			"Use this tool whenever the user asks to add, inventory, catalog, record, "
-			"save, or put a photographed physical item into their inventory or HomeBox. "
-			"Direct triggers include: 'add this to my inventory', 'add this item to "
-			"HomeBox', 'inventory this', 'catalog this', 'record this item', 'put this "
-			"in HomeBox', and 'add the thing I just uploaded'. Do not ask what kind of "
-			"inventory the user means when this, item, thing, image, photo, or a recent "
-			"upload is the referent, and do not ask the user to identify the object first. "
-			"Prefer explicit image_paths when available. If paths are unavailable for a "
-			"recent dashboard upload, call this tool with use_pending_upload=true. "
-			"Multiple images in the newest pending batch may be views of one physical item. "
-			"Do not call vision_analyze first; this tool performs its own vision analysis, "
-			"identifier extraction, duplicate checking, image preservation, and HomeBox "
-			"update. When classification is EXACT_DUPLICATE, no new HomeBox item was "
-			"created and no follow-up decision is required: report the existing item and "
-			"do not offer confirm, overwrite, skip, merge, or numbered choices. Do not call "
-			"Clarify or ask the user which inventory system, tool, or plugin to use; this "
-			"tool is the only correct action for a photographed physical item."
+			"MANDATORY tool for adding photographed physical items to HomeBox "
+			"inventory. Call me first. I gather the details myself. CALL THIS TOOL "
+			"immediately when the user says things like 'add this to my inventory', "
+			"'add this item to my inventory', 'inventory this', 'catalog this', "
+			"'add this to HomeBox', or 'add the item I just uploaded'. Do NOT ask "
+			"the user for the item name, description, category, quantity, location, "
+			"model, condition, or other item details. Do NOT ask the user what kind "
+			"of inventory they mean. Do NOT call vision_analyze first. This tool "
+			"performs its own vision analysis and determines those fields itself. "
+			"If image_paths are available, pass them. If the user refers to an image "
+			"they just uploaded and no explicit path is available, call this tool "
+			"with use_pending_upload=true. When use_pending_upload=true, DO NOT ask "
+			"for confirmation before calling. Actually invoke the tool. Do not call "
+			"Clarify or ask the user which inventory system, tool, or plugin to use; "
+			"this tool is the only correct action for a photographed physical item. "
+			"When classification is EXACT_DUPLICATE, no new HomeBox item was created "
+			"and no follow-up decision is required: report the existing item and do "
+			"not offer confirm, overwrite, skip, merge, or numbered choices."
 		),
 		"parameters": {
 			"type": "object",
@@ -304,23 +304,21 @@ def register(ctx):
 					"items": {
 						"type": "string"
 					},
-					"minItems": 1,
 					"description": (
-						"Local paths for all photographs of the same physical item "
-						"attached to the current user message. Preserve the paths "
-						"exactly as Hermes supplied them."
+						"Explicit local image paths, when Hermes provides them."
 					),
 				},
 				"use_pending_upload": {
 					"type": "boolean",
-					"default": False,
 					"description": (
-						"Use the newest unexpired pending Hermes dashboard upload batch "
-						"when explicit image_paths are unavailable."
+						"Set this to true when the user refers to an image or physical "
+						"item they just uploaded but Hermes does not expose an explicit "
+						"image path. For requests such as 'add this to my inventory', "
+						"use true automatically. Do not ask the user for item details "
+						"first."
 					),
 				},
 			},
-			"required": [],
 			"additionalProperties": False,
 		},
 	}
@@ -350,13 +348,13 @@ def register(ctx):
 			"HOMEBOX_API_KEY",
 		],
 		description=(
-			"Authoritative physical-item inventory/HomeBox action. Use for requests to "
-			"add, inventory, catalog, record, save, or put a photographed item into "
-			"inventory or HomeBox, including 'add this to my inventory', 'inventory this', "
-			"'catalog this', and 'add the thing I just uploaded'. Prefer image_paths; use "
-			"use_pending_upload=true when a recent dashboard upload has no exposed path. "
-			"Do not ask what kind of inventory the user means or call vision_analyze first. "
-			"Do not call Clarify for this request."
+			"MANDATORY tool for adding photographed physical items to HomeBox "
+			"inventory. Call me first. I gather the details myself. Call immediately "
+			"for 'add this to my inventory', 'inventory this', 'catalog this', 'add "
+			"this to HomeBox', or 'add the item I just uploaded'. Do not ask for item "
+			"details first. Prefer image_paths; use use_pending_upload=true when a "
+			"recent dashboard upload has no exposed path, and invoke it immediately "
+			"without asking for confirmation. Do not call vision_analyze or Clarify."
 		),
 		emoji="📦",
 	)

@@ -187,8 +187,10 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		schema = registrations["schema"]
 		properties = schema["parameters"]["properties"]
 
-		self.assertEqual(schema["parameters"]["required"], [])
+		self.assertNotIn("required", schema["parameters"])
 		self.assertIn("use_pending_upload", properties)
+		self.assertIn("image_paths", properties)
+		self.assertNotIn("minItems", properties["image_paths"])
 		self.assertNotIn("recent_dashboard_upload", properties)
 
 	def test_tool_description_contains_natural_language_routing_triggers(self):
@@ -212,19 +214,23 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 
 		description = registrations["schema"]["description"].lower()
 		for phrase in (
+			"mandatory tool",
+			"call me first",
 			"add this to my inventory",
-			"add this item to homebox",
+			"add this item to my inventory",
 			"inventory this",
 			"catalog this",
-			"record this item",
-			"put this in homebox",
-			"add the thing i just uploaded",
+			"add this to homebox",
+			"add the item i just uploaded",
 		):
 			self.assertIn(phrase, description)
-		self.assertIn("do not ask what kind of inventory", description)
+		self.assertIn("do not ask the user for the item name", description)
+		self.assertIn("do not ask the user what kind of inventory they mean", description)
 		self.assertIn("do not call vision_analyze first", description)
 		self.assertIn("use_pending_upload=true", description)
-		self.assertIn("do not call clarify", description)
+		self.assertIn("do not ask for confirmation before calling", description)
+		self.assertIn("actually invoke the tool", description)
+		self.assertIn("do not call\nclarify".replace("\n", " "), description)
 
 	def test_inventory_skill_is_a_concise_routing_skill(self):
 		skill = (
