@@ -1,0 +1,9 @@
+name: hermes-inventory
+version: "0.1.0"
+description: Add photographed physical items to a HomeBox inventory.
+manifest_version: 2
+api_version: 1
+provides_tools: [inventory_ingest]
+requires_env: [{name: HOMEBOX_URL, description: "Base URL of the HomeBox API used for inventory updates.", secret: false}, {name: HOMEBOX_API_KEY, description: "Bearer token for the configured HomeBox API.", secret: true}]
+python_dependencies: ["requests>=2.31,<3"]
+tags: [inventory, homebox, vision]
