@@ -5,14 +5,21 @@ or record a photographed physical item in HomeBox.
 
 ## Tool-selection rules
 
-- Use `inventory_ingest` directly when it can consume the attached local image
-	paths. Do not call `vision_analyze` first merely to identify the item.
+- When the user asks to add, catalog, inventory, or record a physical item from
+	an image, use `inventory_ingest` directly. Do not call `vision_analyze` first
+	merely to identify the item.
+- If Hermes exposes explicit local image paths, pass them as `image_paths`.
+- If the user just uploaded or pasted an image but Hermes exposes no usable
+	path, call `inventory_ingest` with `recent_dashboard_upload: true`. Do not ask
+	the user to upload the same image again solely because the path is missing.
 - Pass every relevant photograph of the item together in one `image_paths`
 	array. They are views of one physical item unless the user clearly says
 	otherwise.
 - Preserve attachment paths exactly as Hermes supplied them.
 - Do not infer a photograph's semantic role from its filename. The inventory
 	vision pipeline determines roles from image contents.
+- Multiple recent dashboard uploads from one short burst may be multiple views
+	of the same physical item and can be resolved together by the fallback.
 
 ## Duplicate rules
 

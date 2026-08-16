@@ -75,6 +75,9 @@ export HOMEBOX_URL="http://homebox.example.internal"
 export HOMEBOX_API_KEY="replace-with-a-secret-from-your-runtime"
 export INVENTORY_BASE_DIR="/opt/data/inventory"
 export HERMES_HOME="/opt/data"
+# Optional dashboard-upload fallback tuning
+export INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS="120"
+export INVENTORY_DASHBOARD_BURST_SECONDS="10"
 ```
 
 | Variable | Required | Purpose |
@@ -83,6 +86,8 @@ export HERMES_HOME="/opt/data"
 | `HOMEBOX_API_KEY` | Yes | Bearer token used for HomeBox API requests. |
 | `INVENTORY_BASE_DIR` | No | Persistent data root. Defaults to `/opt/data/inventory`. |
 | `HERMES_HOME` | No | Root that tool image paths must remain beneath. Defaults to `/opt/data`. |
+| `INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS` | No | How recent a dashboard upload must be for fallback resolution. Defaults to `120`. |
+| `INVENTORY_DASHBOARD_BURST_SECONDS` | No | Maximum timestamp gap for grouping recent dashboard views. Defaults to `10`. |
 
 `HOMEBOX_URL` intentionally has no installation-specific default. The code
 discovers HomeBox's non-location `Item` entity type at runtime rather than
@@ -135,7 +140,8 @@ directories are created as needed below `INVENTORY_BASE_DIR`:
 ├── originals/       # immutable copied source photographs by inventory ID
 ├── metadata/        # raw structured model response by inventory ID
 ├── receipts/        # auditable ingest outcomes, including duplicate attempts
-└── tool-staging/    # temporary copied Hermes attachments, removed per call
+├── tool-staging/    # temporary copied Hermes attachments, removed per call
+└── dashboard-upload-state.json  # consumed fallback-upload paths, pruned
 ```
 
 Plugin upgrades must preserve these paths. The original photographs remain the
@@ -143,9 +149,26 @@ raw evidence for inspection, reprocessing, and hash verification.
 
 ## Tool behavior
 
-The plugin registers `inventory_ingest` in the `inventory` toolset. Its input
-is an `image_paths` array of one or more local image paths. All paths represent
-one physical item and are staged together before processing.
+The plugin registers `inventory_ingest` in the `inventory` toolset. Its
+preferred input is an `image_paths` array of one or more local image paths. All
+paths represent one physical item and are staged together before processing.
+
+For stock Hermes dashboard behavior, the tool also accepts
+`recent_dashboard_upload: true` when no explicit path is available. The
+fallback inspects only direct children of `HERMES_HOME/images` whose names begin
+with `dashboard_` and whose extensions are supported. It uses the timestamp in
+the Hermes filename when available, rejects files older than the configured
+short window, and groups files from the newest upload burst in chronological
+order. Files selected by the fallback are recorded in
+`INVENTORY_BASE_DIR/dashboard-upload-state.json` and are not selected again.
+
+Explicit `image_paths` always take priority and remain the safest option. The
+fallback is intended primarily for a single-user or local Hermes deployment.
+The filesystem directory does not contain session identity, so a small
+theoretical race remains possible if multiple sessions upload images at the
+same time. The plugin never scans arbitrary directories, recursively searches
+for images, or chooses an arbitrary newest file outside the dashboard naming
+and time rules.
 
 The entry point accepts only regular files below `HERMES_HOME`, rejects
 unsupported extensions, resolves symlinks, and de-duplicates repeated paths.
@@ -264,15 +287,20 @@ Suggested regression checks are:
   into a unique staging directory before ingestion.
 - Original source files are copied rather than modified in place.
 
-## Known limitation: stock dashboard attachments
+## Stock dashboard upload fallback
 
-The inventory backend accepts valid attached-image paths and does not require
-Hermes core changes. A clean stock Hermes dashboard deployment was observed to
-upload an image and display an `/image /opt/data/images/...` command without
-attaching that file to the active conversation. Historical experiments fixed
-that platform issue by modifying Hermes' `image.attach` routing, but those
-patches are deliberately not included here.
+Hermes dashboard uploads are normally written below `HERMES_HOME/images`, often
+with names such as `dashboard_20260816_031936_<token>.png`. If the dashboard
+renders the `/image` command but does not expose the exact path to the model,
+the inventory skill can call:
 
-Until Hermes provides a supported plugin-level attachment bridge, this remains
-a Hermes dashboard limitation rather than an inventory backend workaround. No
-file under `/opt/hermes` is modified by this repository.
+```json
+{"recent_dashboard_upload": true}
+```
+
+The plugin resolves a recent, unconsumed dashboard upload or short upload burst
+and sends the result through the same existing staging, vision, duplicate, and
+HomeBox pipeline. This is a plugin-only convenience fallback; it does not
+modify `/opt/hermes`, Hermes dashboard JavaScript, `/image`, `image.attach`,
+the CLI, the TUI, or the gateway. Explicit paths remain preferred because the
+filesystem-only fallback cannot provide perfect session isolation.

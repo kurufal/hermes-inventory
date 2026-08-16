@@ -4,12 +4,36 @@ import os
 from pathlib import Path
 
 
+HERMES_HOME = Path(
+	os.environ.get(
+		"HERMES_HOME",
+		"/opt/data",
+	)
+).expanduser().resolve()
+
 INVENTORY_BASE_DIR = Path(
 	os.environ.get(
 		"INVENTORY_BASE_DIR",
-		"/opt/data/inventory",
+		str(HERMES_HOME / "inventory"),
 	)
-).expanduser()
+).expanduser().resolve()
+
+DASHBOARD_IMAGES_DIR = HERMES_HOME / "images"
+DASHBOARD_UPLOAD_WINDOW_SECONDS = int(
+	os.environ.get(
+		"INVENTORY_DASHBOARD_UPLOAD_WINDOW_SECONDS",
+		"120",
+	)
+)
+DASHBOARD_BURST_SECONDS = int(
+	os.environ.get(
+		"INVENTORY_DASHBOARD_BURST_SECONDS",
+		"10",
+	)
+)
+DASHBOARD_UPLOAD_STATE_PATH = (
+	INVENTORY_BASE_DIR / "dashboard-upload-state.json"
+)
 
 # Backward-compatible name for callers that used the former backend module.
 BASE_DIR = INVENTORY_BASE_DIR

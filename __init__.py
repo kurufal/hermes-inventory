@@ -6,24 +6,19 @@ local inventory package bundled with this plugin.
 """
 
 import json
-import os
 import shutil
 import sys
 import uuid
 from pathlib import Path
 
-
-HERMES_HOME = Path(
-	os.environ.get("HERMES_HOME", "/opt/data")
-).expanduser().resolve()
+from inventory.config import HERMES_HOME, INVENTORY_BASE_DIR
+from inventory.uploads import (
+	RecentDashboardUploadError,
+	mark_dashboard_uploads_consumed,
+	resolve_recent_dashboard_uploads,
+)
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
-INVENTORY_BASE_DIR = Path(
-	os.environ.get(
-		"INVENTORY_BASE_DIR",
-		str(HERMES_HOME / "inventory"),
-	)
-).expanduser().resolve()
 STAGING_ROOT = INVENTORY_BASE_DIR / "tool-staging"
 
 SUPPORTED_IMAGES = {
@@ -140,8 +135,24 @@ def _stage_images(image_paths):
 	return stage_dir
 
 
-def inventory_ingest(image_paths, vision_client):
+def inventory_ingest(
+	image_paths,
+	vision_client,
+	recent_dashboard_upload=False,
+):
 	"""Ingest one physical item represented by attached photographs."""
+
+	using_recent_dashboard_upload = not image_paths and recent_dashboard_upload is True
+	if using_recent_dashboard_upload:
+		try:
+			image_paths = resolve_recent_dashboard_uploads()
+		except RecentDashboardUploadError as exc:
+			return _json_error(str(exc))
+	elif not image_paths:
+		return _json_error(
+			"No image paths were supplied. Provide image_paths or set "
+			"recent_dashboard_upload to true."
+		)
 
 	try:
 		images = _normalize_image_paths(image_paths)
@@ -153,6 +164,11 @@ def inventory_ingest(image_paths, vision_client):
 	try:
 		ingest = _load_inventory_ingest()
 		stage_dir = _stage_images(images)
+		if using_recent_dashboard_upload:
+			# Staging succeeded, so the upload has been accepted for processing.
+			# Mark it before vision/HomeBox work so an EXACT_DUPLICATE and a
+			# later processing failure cannot cause accidental reuse.
+			mark_dashboard_uploads_consumed(images)
 
 		result = ingest(
 			str(stage_dir),
@@ -235,10 +251,15 @@ def register(ctx):
 	schema = {
 		"name": "inventory_ingest",
 		"description": (
-			"Add a physical item to the user's local inventory from photographs "
-			"attached to the current user message. Pass every relevant local image "
-			"path shown in the current message's attachment references. Multiple "
-			"photos of the same physical item should be passed together in one call. "
+				"Add a physical item to the user's local inventory from photographs "
+				"attached to the current user message. Prefer passing every relevant "
+				"local image path shown in the current message's attachment references "
+				"in image_paths. If the user just uploaded or pasted an image but Hermes "
+				"did not expose an explicit path, call this tool with "
+				"recent_dashboard_upload=true. Multiple recent dashboard uploads from "
+				"one short burst may be views of the same physical item and are passed "
+				"together. Do not ask the user to reattach solely because the path is "
+				"unavailable. "
 			"The tool performs its own vision analysis, identifier extraction, "
 			"duplicate checking, image preservation, and HomeBox update. When this "
 			"tool returns classification EXACT_DUPLICATE, no new HomeBox item was "
@@ -262,11 +283,17 @@ def register(ctx):
 						"attached to the current user message. Preserve the paths "
 						"exactly as Hermes supplied them."
 					),
-				}
+				},
+				"recent_dashboard_upload": {
+					"type": "boolean",
+					"default": False,
+					"description": (
+						"When true and image_paths is omitted, resolve an unconsumed "
+						"dashboard image upload from the recent upload window."
+					),
+				},
 			},
-			"required": [
-				"image_paths"
-			],
+			"required": [],
 			"additionalProperties": False,
 		},
 	}
@@ -280,6 +307,10 @@ def register(ctx):
 		return inventory_ingest(
 			params.get("image_paths", []),
 			ctx.llm,
+			recent_dashboard_upload=params.get(
+				"recent_dashboard_upload",
+				False,
+			),
 		)
 
 	registration = ctx.register_tool(
@@ -292,7 +323,8 @@ def register(ctx):
 			"HOMEBOX_API_KEY",
 		],
 		description=(
-			"Add attached photographs of a physical item to HomeBox inventory."
+			"Add attached photographs of a physical item to HomeBox inventory; "
+			"use recent_dashboard_upload when a dashboard upload has no exposed path."
 		),
 		emoji="📦",
 	)
