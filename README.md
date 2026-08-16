@@ -37,7 +37,7 @@ No file under `/opt/hermes` is modified.
 ## Installation
 
 Install the plugin from GitHub using Hermes' normal plugin command, then
-install its declared Python dependency in the environment that runs Hermes:
+install its required Python dependency in the environment that runs Hermes:
 
 ```sh
 hermes plugins install OWNER/hermes-inventory --enable
@@ -46,9 +46,9 @@ hermes plugins doctor ~/.hermes/plugins/hermes-inventory --ci
 ```
 
 Replace `OWNER` with the GitHub account or organization that owns this
-repository. Hermes surfaces `python_dependencies` at installation time but
-does not install them automatically. If the Hermes installation uses a virtual
-environment or a container image, run the second command with that
+repository. The plugin keeps its requirements in [requirements.txt](requirements.txt),
+and Hermes does not install them automatically. If the Hermes installation uses
+a virtual environment or a container image, run the second command with that
 environment's Python. Use the actual plugin path instead of
 `~/.hermes/plugins/hermes-inventory` when `HERMES_HOME` is customized.
 

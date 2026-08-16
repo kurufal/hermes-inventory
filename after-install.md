@@ -1,6 +1,6 @@
 # hermes-inventory installed
 
-1. Install the declared Python dependency in the same environment that runs Hermes:
+1. Install the required Python dependency in the same environment that runs Hermes:
 
    `python -m pip install "requests>=2.31,<3"`
 
