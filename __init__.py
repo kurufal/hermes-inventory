@@ -162,7 +162,11 @@ def inventory_ingest(
 			pending_batch = resolve_pending_upload_batch(claim=True)
 			image_paths = [str(path) for path in pending_batch.image_paths]
 		except PendingUploadError as exc:
-			return _json_error(str(exc))
+			return _json_error(
+				str(exc),
+				error_stage="pending_upload_resolution",
+				pending_debug=getattr(exc, "debug", {}) or {},
+			)
 	elif not image_paths:
 		return _json_error(
 			"No image paths were supplied. Provide image_paths or set "
@@ -288,7 +292,9 @@ def register(ctx):
 			"identifier extraction, duplicate checking, image preservation, and HomeBox "
 			"update. When classification is EXACT_DUPLICATE, no new HomeBox item was "
 			"created and no follow-up decision is required: report the existing item and "
-			"do not offer confirm, overwrite, skip, merge, or numbered choices."
+			"do not offer confirm, overwrite, skip, merge, or numbered choices. Do not call "
+			"Clarify or ask the user which inventory system, tool, or plugin to use; this "
+			"tool is the only correct action for a photographed physical item."
 		),
 		"parameters": {
 			"type": "object",
@@ -349,7 +355,8 @@ def register(ctx):
 			"inventory or HomeBox, including 'add this to my inventory', 'inventory this', "
 			"'catalog this', and 'add the thing I just uploaded'. Prefer image_paths; use "
 			"use_pending_upload=true when a recent dashboard upload has no exposed path. "
-			"Do not ask what kind of inventory the user means or call vision_analyze first."
+			"Do not ask what kind of inventory the user means or call vision_analyze first. "
+			"Do not call Clarify for this request."
 		),
 		emoji="📦",
 	)

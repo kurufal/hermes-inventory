@@ -393,6 +393,14 @@ def _batch_to_result(
 	)
 
 
+def _count_dashboard_candidates(images_dir: Path) -> int:
+	try:
+		entries = images_dir.resolve(strict=True).iterdir()
+	except OSError:
+		return 0
+	return sum(1 for path in entries if _supported_dashboard_file(path))
+
+
 def resolve_pending_upload_batch(
 	*,
 	now: float | None = None,
@@ -400,57 +408,98 @@ def resolve_pending_upload_batch(
 	state_path: Path = PENDING_UPLOAD_STATE_PATH,
 	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
 	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	batch_window_seconds: float = UPLOAD_BATCH_WINDOW_SECONDS,
+	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
 	claim: bool = False,
 	logger: logging.Logger = _LOGGER,
 ) -> PendingUploadBatch:
-	"""Resolve the newest valid unexpired pending batch."""
+	"""Resolve the newest valid unexpired pending batch.
+
+	If no valid pending batch exists yet, this reconciles *images_dir*
+	inline (the same logic the background watcher runs) before giving up.
+	This removes the race where a user asks to inventory an upload
+	immediately after it lands, before the watcher's next poll tick — or
+	when the watcher has not run at all.
+	"""
 
 	current = time.time() if now is None else now
-	with _STATE_LOCK:
-		state_missing = not state_path.exists()
-		state = _read_state_locked(state_path, logger)
-		state_missing = state_missing or not state_path.exists()
-		changed = state_missing or _expire_and_prune_locked(
-			state,
-			current,
-			ttl_seconds=ttl_seconds,
-			retention_seconds=retention_seconds,
-			logger=logger,
-		)
-		if changed:
-			_write_state_locked(state_path, state)
+	attempted_reconciliation = False
+	pending_batch_count = 0
+	total_batch_count = 0
 
-		pending = [
-			batch
-			for batch in state["batches"]
-			if isinstance(batch, dict)
-			and batch.get("status") == "pending"
-			and str(batch.get("batch_id", "")) not in _CLAIMED_BATCHES
-		]
-		pending.sort(key=_batch_updated_timestamp, reverse=True)
-		if not pending:
-			raise PendingUploadError("No recent pending dashboard upload was found.")
+	while True:
+		with _STATE_LOCK:
+			state_missing = not state_path.exists()
+			state = _read_state_locked(state_path, logger)
+			state_missing = state_missing or not state_path.exists()
+			changed = state_missing or _expire_and_prune_locked(
+				state,
+				current,
+				ttl_seconds=ttl_seconds,
+				retention_seconds=retention_seconds,
+				logger=logger,
+			)
+			if changed:
+				_write_state_locked(state_path, state)
 
-		batch = pending[0]
+			pending = [
+				batch
+				for batch in state["batches"]
+				if isinstance(batch, dict)
+				and batch.get("status") == "pending"
+				and str(batch.get("batch_id", "")) not in _CLAIMED_BATCHES
+			]
+			pending.sort(key=_batch_updated_timestamp, reverse=True)
+			pending_batch_count = len(pending)
+			total_batch_count = len(state["batches"])
+
+			if pending:
+				batch = pending[0]
+				try:
+					result = _batch_to_result(batch, images_dir)
+				except PendingUploadError:
+					batch["status"] = "expired"
+					batch["updated_at"] = _iso(current)
+					_write_state_locked(state_path, state)
+					raise
+				try:
+					expires_at = _timestamp(result.expires_at)
+				except (TypeError, ValueError):
+					expires_at = 0
+				if expires_at > current:
+					if claim:
+						_CLAIMED_BATCHES.add(result.batch_id)
+					return result
+				batch["status"] = "expired"
+				batch["updated_at"] = _iso(current)
+				_write_state_locked(state_path, state)
+
+		if attempted_reconciliation:
+			break
+		attempted_reconciliation = True
 		try:
-			result = _batch_to_result(batch, images_dir)
-		except PendingUploadError:
-			batch["status"] = "expired"
-			batch["updated_at"] = _iso(current)
-			_write_state_locked(state_path, state)
-			raise
-		try:
-			expires_at = _timestamp(result.expires_at)
-		except (TypeError, ValueError):
-			expires_at = 0
-		if expires_at <= current:
-			batch["status"] = "expired"
-			batch["updated_at"] = _iso(current)
-			_write_state_locked(state_path, state)
-			raise PendingUploadError("No recent pending dashboard upload was found.")
-		if claim:
-			_CLAIMED_BATCHES.add(result.batch_id)
-		return result
+			observe_dashboard_uploads(
+				now=current,
+				images_dir=images_dir,
+				state_path=state_path,
+				batch_window_seconds=batch_window_seconds,
+				ttl_seconds=ttl_seconds,
+				retention_seconds=retention_seconds,
+				stability_delay_seconds=stability_delay_seconds,
+				logger=logger,
+			)
+		except Exception:
+			logger.exception("Inline reconciliation before pending resolution failed")
+			break
+
+	error = PendingUploadError("No recent pending dashboard upload was found.")
+	error.debug = {
+		"state_file": str(state_path),
+		"pending_batch_count": pending_batch_count,
+		"total_batch_count": total_batch_count,
+		"candidate_count": _count_dashboard_candidates(images_dir),
+	}
+	raise error
 
 
 def mark_pending_upload_consumed(

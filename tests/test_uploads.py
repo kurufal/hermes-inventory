@@ -207,6 +207,43 @@ class PendingUploadTests(unittest.TestCase):
 			self.resolve_batch(now=self.now)
 		self.assertEqual(self.read_state()["batches"][0]["status"], "expired")
 
+	def test_resolve_reconciles_unrecorded_upload_before_watcher_polls(self):
+		# Critical regression: a user can ask to inventory an upload before
+		# the background watcher has had a chance to observe it (or when no
+		# watcher is running at all). resolve_pending_upload_batch must not
+		# depend on a prior observe() call succeeding first.
+		path = self.add_image("dashboard_20260816_084100_front.jpg")
+
+		batch = self.resolve_batch(now=self.now, stability_delay_seconds=0)
+
+		self.assertEqual(list(batch.image_paths), [path.resolve()])
+		self.assertEqual(len(self.read_state()["batches"]), 1)
+		self.assertEqual(self.read_state()["batches"][0]["status"], "pending")
+
+	def test_resolve_reconciliation_ignores_already_recorded_files(self):
+		self.add_image("dashboard_20260816_084100_front.jpg")
+		self.observe(now=self.now)
+		batch = self.resolve_batch(now=self.now)
+		mark_pending_upload_consumed(batch.batch_id, state_path=self.state)
+
+		# No new files landed, so reconciliation must not resurrect the
+		# already-consumed upload as a new pending batch.
+		with self.assertRaises(PendingUploadError):
+			self.resolve_batch(now=self.now)
+		self.assertEqual(len(self.read_state()["batches"]), 1)
+		self.assertEqual(self.read_state()["batches"][0]["status"], "consumed")
+
+	def test_resolve_failure_includes_structured_diagnostics(self):
+		try:
+			self.resolve_batch(now=self.now, stability_delay_seconds=0)
+			self.fail("expected PendingUploadError")
+		except PendingUploadError as exc:
+			debug = exc.debug
+			self.assertEqual(debug["state_file"], str(self.state))
+			self.assertEqual(debug["pending_batch_count"], 0)
+			self.assertEqual(debug["total_batch_count"], 0)
+			self.assertEqual(debug["candidate_count"], 0)
+
 	def test_detection_then_unrelated_time_keeps_batch_pending_until_ttl(self):
 		self.add_image("dashboard_20260816_084100_front.jpg")
 		self.observe(now=self.now)

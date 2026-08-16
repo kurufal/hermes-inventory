@@ -146,6 +146,26 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn('"status": "error"', result)
 		self.assertIn("No recent pending dashboard upload", result)
 
+	def test_no_pending_batch_includes_structured_diagnostics(self):
+		error = PendingUploadError("No recent pending dashboard upload was found.")
+		error.debug = {
+			"state_file": "/opt/data/inventory/pending-uploads.json",
+			"pending_batch_count": 0,
+			"total_batch_count": 2,
+			"candidate_count": 0,
+		}
+		with patch.object(
+			self.plugin,
+			"resolve_pending_upload_batch",
+			side_effect=error,
+		):
+			result, _, _ = self.run_ingest([], use_pending=True)
+
+		self.assertIn('"error_stage": "pending_upload_resolution"', result)
+		self.assertIn('"pending_debug"', result)
+		self.assertIn('"candidate_count": 0', result)
+		self.assertIn('"total_batch_count": 2', result)
+
 	def test_registered_schema_has_optional_pending_mode(self):
 		registrations = {}
 
@@ -204,6 +224,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("do not ask what kind of inventory", description)
 		self.assertIn("do not call vision_analyze first", description)
 		self.assertIn("use_pending_upload=true", description)
+		self.assertIn("do not call clarify", description)
 
 	def test_inventory_skill_is_a_concise_routing_skill(self):
 		skill = (
@@ -224,6 +245,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("what kind of inventory?", skill)
 		self.assertIn("use_pending_upload", skill)
 		self.assertIn("do not call `vision_analyze` first", skill)
+		self.assertIn("do not call `clarify`", skill)
 
 
 if __name__ == "__main__":

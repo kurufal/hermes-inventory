@@ -60,6 +60,10 @@ found, invoke it. Do not route every occurrence of “add” to this tool: “ad
 reminder”, “add this sentence to my notes”, and “add this bookmark” are not
 physical inventory commands.
 
+Do not call `Clarify` for an inventory verb plus a recent-upload referent. Do
+not ask which inventory tool, system, or plugin to use. There is exactly one
+correct action: `inventory_ingest`.
+
 ## Duplicates and multiple images
 
 If the tool returns `EXACT_DUPLICATE`, no new HomeBox item was created and no
