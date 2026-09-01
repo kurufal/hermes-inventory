@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from inventory.ingest import VisionParseError, ingest, run_vision
+from inventory.ingest import VisionParseError, ingest, prepare_originals, run_vision
 
 
 class FakeVisionClient:
@@ -87,8 +87,8 @@ class IngestCommittedImageTests(unittest.TestCase):
 	def setUp(self):
 		self.temporary_directory = tempfile.TemporaryDirectory()
 		self.root = Path(self.temporary_directory.name)
-		self.source = self.root / "staged-upload"
-		self.source.mkdir()
+		self.source = self.root / "user_media" / "next-item"
+		self.source.mkdir(parents=True)
 		(self.source / "camera-front.jpg").write_bytes(b"source-image")
 		(self.source / ".inventory-provenance.json").write_text(
 			json.dumps({"camera-front.jpg": "upload_20260831_120000_front.jpg"}),
@@ -188,6 +188,15 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.assertEqual(manifest["homebox"]["entity_id"], "entity-1")
 		self.assertTrue(all(directory == images for directory in self.homebox_directories))
 		self.assertTrue(all(".tmp-" not in str(directory) for directory in self.homebox_directories))
+
+	def test_direct_source_directory_api_supports_manual_development_fixture(self):
+		manual_source = self.root / "user_media" / "next-item"
+		manual_source.mkdir(parents=True, exist_ok=True)
+		(manual_source / "manual.jpg").write_bytes(b"manual")
+		destination = self.root / "copied-originals"
+		destination.mkdir()
+		prepare_originals(manual_source, destination)
+		self.assertEqual((destination / "manual.jpg").read_bytes(), b"manual")
 
 
 if __name__ == "__main__":

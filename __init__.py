@@ -380,5 +380,11 @@ def register(ctx):
 		register_command(name="inventory", handler=inventory_command, description="Inventory setup, storage, backup, and recovery commands.")
 	register_cli_command = getattr(ctx, "register_cli_command", None)
 	if callable(register_cli_command):
-		from inventory.commands import inventory_cli
-		register_cli_command(name="inventory", handler=inventory_cli, description="Configure Hermes Inventory secrets locally.")
+		from inventory.cli import handle_inventory_cli, setup_inventory_cli
+		register_cli_command(
+			"inventory",
+			"Configure Hermes Inventory secrets locally.",
+			setup_inventory_cli,
+			handle_inventory_cli,
+			description="Configure Hermes Inventory secrets locally.",
+		)

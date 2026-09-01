@@ -73,6 +73,16 @@ class PendingUploadTests(unittest.TestCase):
 		self.assertEqual(batch["images"][0]["size"], len(b"image"))
 		self.assertEqual(batch["images"][0]["dashboard_timestamp"], "2026-08-16T08:41:00Z")
 
+	def test_realistic_dashboard_jpg_filename_is_accepted(self):
+		path = self.add_image("dashboard_20260815_190339_9d84_signal-photo.jpg")
+		self.assertEqual(self.observe(now=datetime(2026, 8, 15, 19, 4, tzinfo=UTC).timestamp()), 1)
+		self.assertEqual(self.read_state()["batches"][0]["images"][0]["path"], str(path.resolve()))
+
+	def test_realistic_dashboard_png_filename_is_accepted(self):
+		path = self.add_image("dashboard_20260816_184748_6c11_signal-photo.png")
+		self.assertEqual(self.observe(now=datetime(2026, 8, 16, 18, 48, tzinfo=UTC).timestamp()), 1)
+		self.assertEqual(self.read_state()["batches"][0]["images"][0]["path"], str(path.resolve()))
+
 	def test_non_dashboard_and_unsupported_files_are_ignored(self):
 		self.add_image("photo.jpg")
 		self.add_image("dashboard_20260816_084100_notes.txt")
@@ -89,6 +99,15 @@ class PendingUploadTests(unittest.TestCase):
 		self.assertEqual(self.observe(), 2)
 		paths = [image["path"] for image in self.read_state()["batches"][0]["images"]]
 		self.assertEqual(set(paths), {str(first.resolve()), str(second.resolve())})
+
+	def test_sibling_media_directories_are_never_automatically_scanned(self):
+		for directory_name in ("media", "image_cache", "user_media"):
+			directory = self.root / directory_name
+			directory.mkdir()
+			(directory / "dashboard_20260816_084100_unrelated.jpg").write_bytes(b"image")
+
+		self.assertEqual(self.observe(), 0)
+		self.assertEqual(self.read_state()["batches"], [])
 
 	def test_malformed_dashboard_filename_uses_detected_time(self):
 		path = self.add_image("dashboard_not-a-timestamp.png")

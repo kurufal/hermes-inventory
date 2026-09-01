@@ -6,6 +6,9 @@ photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 When `inventory_ingest` returns `not_configured`, direct the user to
 `/inventory setup`. Do not request or accept a HomeBox API key in chat.
 `/inventory setup secrets` provides the local secure terminal workflow.
+Configuration may be Windows Desktop or Docker/container based; use resolved
+paths reported by `/inventory setup`, and never assume a host path is visible
+inside a container.
 
 Treat these as direct inventory commands:
 

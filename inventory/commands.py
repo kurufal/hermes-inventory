@@ -53,6 +53,7 @@ def _format_checks(checks):
 
 def _status(settings):
 	return "\n".join([
+		f"Hermes home: {settings.hermes_home}",
 		f"Hermes uploads: {settings.hermes_images_dir}",
 		f"Inventory runtime: {settings.runtime_dir}",
 		f"Inventory persistent data: {settings.persistent_data_dir}",

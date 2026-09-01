@@ -114,3 +114,11 @@ class InventorySettingsTests(unittest.TestCase):
 		with patch.dict(sys.modules, {"hermes_constants": helper}):
 			write_homebox_api_key("secret", SimpleNamespace())
 		self.assertEqual(calls, [("HOMEBOX_API_KEY", "secret")])
+
+	def test_default_persistent_inventory_is_not_in_hermes_media_directories(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
+				settings = get_settings()
+		self.assertEqual(settings.persistent_data_dir, Path(temporary_directory) / "inventory")
+		for media_directory in ("images", "media", "image_cache", "user_media"):
+			self.assertNotEqual(settings.persistent_data_dir, Path(temporary_directory) / media_directory)

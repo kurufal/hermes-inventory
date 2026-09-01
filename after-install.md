@@ -1,10 +1,17 @@
 # hermes-inventory installed
 
-1. Restart Hermes Desktop, enable `hermes-inventory`, start a new chat, and run `/inventory setup`.
-2. The default persistent storage is `$HERMES_HOME/inventory`. Override it only when needed with `/inventory setup storage <absolute-path>`.
-3. Save the non-secret server address with `/inventory setup homebox <url>`.
-4. Run `/inventory setup secrets`. Never enter an API key in chat; it provides `hermes inventory setup --secrets` for secure hidden terminal input into Hermes' normal `.env`.
-5. Return to Desktop, run `/inventory setup`, then attach an image and say `Add this to my inventory.`
-6. Run `/inventory backup create` and `/inventory backup verify` after the first successful ingest.
+## Windows Desktop
+
+1. Restart Hermes Desktop and enable `hermes-inventory` under **Agent plugins**.
+2. Start a new chat and run `/inventory setup`.
+3. Configure optional storage and HomeBox URL, then use `/inventory setup secrets` for the terminal-only API-key workflow.
+
+## Docker
+
+1. Restart or redeploy the Hermes container after placing the plugin under `$HERMES_HOME/plugins`.
+2. Start a new session and run `/inventory setup`.
+3. Configure container paths, `HOMEBOX_URL`, and `HOMEBOX_API_KEY` through the container environment.
+
+The default persistent storage is `$HERMES_HOME/inventory`; custom storage is tested before saving and existing data is not moved. See [README.md](README.md) for host versus container paths, updates, and secrets.
 
 The plugin defaults to `$HERMES_HOME/inventory-runtime` for local operational state and `$HERMES_HOME/inventory` for durable inventory evidence. Its non-secret configuration is `$HERMES_HOME/inventory-config.json`. See [README.md](README.md) for Desktop, Docker, UNC/NAS, recovery, and security guidance.

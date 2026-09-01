@@ -1,6 +1,7 @@
 """Contract tests for the Hermes-facing inventory tool handler."""
 
 import importlib.util
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -276,14 +277,26 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			def register_command(self, **kwargs):
 				registrations["command"] = kwargs
 
-			def register_cli_command(self, **kwargs):
-				registrations["cli"] = kwargs
+			def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+				registrations["cli"] = {
+					"name": name,
+					"help": help,
+					"setup_fn": setup_fn,
+					"handler_fn": handler_fn,
+					"description": description,
+				}
 
 		with patch.object(self.plugin, "start_pending_upload_watcher"):
 			self.plugin.register(FakeContext())
 		self.assertEqual(registrations["command"]["name"], "inventory")
 		self.assertEqual(registrations["cli"]["name"], "inventory")
 		self.assertNotIn("requires_env", registrations["tool"])
+		parser = argparse.ArgumentParser()
+		registrations["cli"]["setup_fn"](parser)
+		namespace = parser.parse_args(["setup", "--secrets"])
+		with patch("inventory.cli.inventory_cli", return_value="ok") as cli:
+			self.assertEqual(registrations["cli"]["handler_fn"](namespace), "ok")
+		cli.assert_called_once_with(["setup", "--secrets"])
 
 	def test_tool_description_contains_natural_language_routing_triggers(self):
 		registrations = {}
