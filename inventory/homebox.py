@@ -485,13 +485,15 @@ def choose_primary_image(record):
 def complete_entity(
 	entity_id,
 	record,
+	*,
+	image_directory=None,
 ):
 	updated = update_entity(
 		entity_id,
 		record,
 	)
 
-	source_directory = Path(
+	source_directory = Path(image_directory) if image_directory is not None else Path(
 		record.get(
 			"source_directory",
 			"",

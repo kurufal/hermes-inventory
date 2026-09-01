@@ -54,26 +54,26 @@ class InventorySettingsTests(unittest.TestCase):
 				with self.assertRaisesRegex(ValueError, "absolute path"):
 					get_settings()
 
-		def test_legacy_yaml_migration_preserves_unrelated_sections(self):
-			with tempfile.TemporaryDirectory() as temporary_directory:
-				home = Path(temporary_directory)
-				(home / "inventory-config.yaml").write_text(
-					"storage:\n  runtime_dir: C:\\Runtime\nuploads:\n  batch_window_seconds: 22\ntoon:\n  enabled: false\nfuture:\n  retained: yes\n",
-					encoding="utf-8",
-				)
-				with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
-					self.assertFalse(get_settings().toon_enabled)
-					write_storage_config(Path("C:/Inventory"))
-				payload = json.loads((home / "inventory-config.json").read_text(encoding="utf-8"))
-				self.assertEqual(payload["storage"]["runtime_dir"], "C:\\Runtime")
-				self.assertEqual(payload["uploads"]["batch_window_seconds"], 22)
-				self.assertFalse(payload["toon"]["enabled"])
-				self.assertEqual(payload["future"]["retained"], True)
+	def test_legacy_yaml_migration_preserves_unrelated_sections(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / "inventory-config.yaml").write_text(
+				"storage:\n  runtime_dir: C:\\Runtime\nuploads:\n  batch_window_seconds: 22\ntoon:\n  enabled: false\nfuture:\n  retained: yes\n",
+				encoding="utf-8",
+			)
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				self.assertFalse(get_settings().toon_enabled)
+				write_storage_config(Path("C:/Inventory"))
+			payload = json.loads((home / "inventory-config.json").read_text(encoding="utf-8"))
+			self.assertEqual(payload["storage"]["runtime_dir"], "C:\\Runtime")
+			self.assertEqual(payload["uploads"]["batch_window_seconds"], 22)
+			self.assertFalse(payload["toon"]["enabled"])
+			self.assertEqual(payload["future"]["retained"], True)
 
-		def test_invalid_toon_boolean_is_rejected(self):
-			with tempfile.TemporaryDirectory() as temporary_directory:
-				home = Path(temporary_directory)
-				(home / "inventory-config.json").write_text('{"toon":{"enabled":"sometimes"}}', encoding="utf-8")
-				with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
-					with self.assertRaisesRegex(ValueError, "toon.enabled must be a boolean"):
-						get_settings()
+	def test_invalid_toon_boolean_is_rejected(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / "inventory-config.json").write_text('{"toon":{"enabled":"sometimes"}}', encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				with self.assertRaisesRegex(ValueError, "toon.enabled must be a boolean"):
+					get_settings()

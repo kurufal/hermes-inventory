@@ -96,7 +96,11 @@ def ingest(source_directory, vision_client, *, settings=None):
 			result = {"status": "duplicate_candidate", "created": False, "durable": True, "item_id": item_id, "classification": duplicate_result["classification"], "duplicate_check": duplicate_result}
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
-		commit_item_transaction(transaction, item_id, settings)
+		final_item_root = commit_item_transaction(transaction, item_id, settings)
+		final_images_dir = final_item_root / "images"
+		record["source_directory"] = str(final_images_dir)
+		raw["source_directory"] = str(final_images_dir)
+		atomic_json_write(final_item_root / "vision.json", raw)
 		previous_manifest = load_manifest(item_id, settings) or initial
 		entity_id = None
 		created = {}
@@ -105,18 +109,18 @@ def ingest(source_directory, vision_client, *, settings=None):
 			entity_id = created.get("id")
 			if not entity_id:
 				raise RuntimeError("HomeBox returned no entity ID")
-			previous_manifest = build_manifest(item_id, record, raw, settings.items_dir / item_id / "images", status="pending_homebox_completion", homebox={"entity_id": entity_id, "asset_id": created.get("assetId"), "collection_id": created.get("groupId"), "entity_type": created.get("entityTypeId"), "last_synced_at": None}, previous=previous_manifest)
+			previous_manifest = build_manifest(item_id, record, raw, final_images_dir, status="pending_homebox_completion", homebox={"entity_id": entity_id, "asset_id": created.get("assetId"), "collection_id": created.get("groupId"), "entity_type": created.get("entityTypeId"), "last_synced_at": None}, previous=previous_manifest)
 			write_manifest(previous_manifest, settings=settings)
-			completed = complete_entity(entity_id, record)
+			completed = complete_entity(entity_id, record, image_directory=final_images_dir)
 		except Exception as exc:
-			write_manifest(build_manifest(item_id, record, raw, settings.items_dir / item_id / "images", status="pending_homebox_sync", homebox={"entity_id": entity_id, "asset_id": created.get("assetId"), "collection_id": created.get("groupId"), "entity_type": created.get("entityTypeId"), "last_synced_at": None}, error=str(exc), previous=previous_manifest), settings=settings)
+			write_manifest(build_manifest(item_id, record, raw, final_images_dir, status="pending_homebox_sync", homebox={"entity_id": entity_id, "asset_id": created.get("assetId"), "collection_id": created.get("groupId"), "entity_type": created.get("entityTypeId"), "last_synced_at": None}, error=str(exc), previous=previous_manifest), settings=settings)
 			write_catalog(settings)
 			result = {"status": "pending_homebox_sync", "created": False, "durable": True, "item_id": item_id, "homebox_entity_id": entity_id, "error": str(exc)}
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
 		result = {"status": "created", "created": True, "durable": True, "item_id": item_id, "homebox_entity_id": entity_id, "asset_id": completed.get("entity", {}).get("assetId"), "name": record.get("name"), "category": record.get("category"), "manufacturer": record.get("manufacturer"), "duplicate_check": duplicate_result, "attachments": completed.get("attachments", [])}
 		homebox_entity = completed.get("entity", {})
-		write_manifest(build_manifest(item_id, record, raw, settings.items_dir / item_id / "images", status="synced", homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": homebox_entity.get("groupId"), "entity_type": homebox_entity.get("entityType", {}).get("id") or created.get("entityTypeId"), "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "fields": homebox_entity.get("fields"), "tags": homebox_entity.get("tags"), "location": homebox_entity.get("location"), "attachments": completed.get("attachments", [])}, previous=previous_manifest), settings=settings)
+		write_manifest(build_manifest(item_id, record, raw, final_images_dir, status="synced", homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": homebox_entity.get("groupId"), "entity_type": homebox_entity.get("entityType", {}).get("id") or created.get("entityTypeId"), "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "fields": homebox_entity.get("fields"), "tags": homebox_entity.get("tags"), "location": homebox_entity.get("location"), "attachments": completed.get("attachments", [])}, previous=previous_manifest), settings=settings)
 		write_catalog(settings)
 		result["receipt_path"] = str(save_receipt(item_id, result, settings))
 		return result
