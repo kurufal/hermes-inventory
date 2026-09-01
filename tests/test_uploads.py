@@ -1,6 +1,7 @@
 """Tests for plugin-owned pending dashboard upload state."""
 
 import json
+import os
 import tempfile
 import threading
 import time
@@ -13,6 +14,7 @@ from inventory import uploads
 from inventory.uploads import (
 	PendingUploadError,
 	mark_pending_upload_consumed,
+	mark_pending_upload_processing,
 	observe_dashboard_uploads,
 	resolve_pending_upload_batch,
 	start_pending_upload_watcher,
@@ -77,6 +79,16 @@ class PendingUploadTests(unittest.TestCase):
 
 		self.assertEqual(self.observe(), 0)
 		self.assertEqual(self.read_state(), {"version": 1, "batches": []})
+
+	def test_upload_and_clip_prefixes_are_pending_uploads(self):
+		first = self.add_image("upload_20260816_084100_front.jpg")
+		second = self.add_image("clip_20260816_084102_back.png")
+		os.utime(first, (self.now, self.now))
+		os.utime(second, (self.now, self.now))
+
+		self.assertEqual(self.observe(), 2)
+		paths = [image["path"] for image in self.read_state()["batches"][0]["images"]]
+		self.assertEqual(set(paths), {str(first.resolve()), str(second.resolve())})
 
 	def test_malformed_dashboard_filename_uses_detected_time(self):
 		path = self.add_image("dashboard_not-a-timestamp.png")
@@ -254,6 +266,21 @@ class PendingUploadTests(unittest.TestCase):
 
 		payload = json.loads(self.state.read_text(encoding="utf-8"))
 		self.assertEqual(payload["batches"][0]["status"], "consumed")
+
+	def test_claimed_batch_uses_its_resolved_state_file_through_completion(self):
+		image = self.add_image("upload_20260816_084100_front.jpg")
+		os.utime(image, (self.now, self.now))
+		self.observe()
+		alternate_state = self.root / "other-pending-uploads.json"
+		alternate_state.write_text(json.dumps(self.read_state()), encoding="utf-8")
+
+		batch = self.resolve_batch(now=self.now, claim=True)
+		self.assertEqual(batch.state_path, self.state)
+		mark_pending_upload_processing(batch.batch_id, state_path=batch.state_path)
+		mark_pending_upload_consumed(batch.batch_id, state_path=batch.state_path)
+
+		self.assertEqual(self.read_state()["batches"][0]["status"], "consumed")
+		self.assertEqual(json.loads(alternate_state.read_text(encoding="utf-8"))["batches"][0]["status"], "pending")
 
 	def test_malformed_state_is_backed_up_and_recovered(self):
 		self.state.write_text("not json", encoding="utf-8")

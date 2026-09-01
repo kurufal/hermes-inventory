@@ -66,7 +66,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				if path.suffix in {".jpg", ".jpeg", ".png", ".webp"}
 			]
 			seen["vision_client"] = vision_client
-			return backend_result or {"status": "created", "created": True}
+			return backend_result or {"status": "created", "created": True, "durable": True}
 
 		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
 			self.plugin,
@@ -76,6 +76,9 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			self.plugin,
 			"mark_pending_upload_consumed",
 		) as mark_consumed, patch.object(
+			self.plugin,
+			"mark_pending_upload_processing",
+		), patch.object(
 			self.plugin,
 			"release_pending_upload_claim",
 		):
@@ -118,7 +121,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			result, seen, mark_consumed = self.run_ingest([], use_pending=True)
 
 		self.assertTrue(resolve_batch.called)
-		mark_consumed.assert_called_once_with("batch-1")
+		self.assertEqual(mark_consumed.call_args.args, ("batch-1",))
+		self.assertIn("state_path", mark_consumed.call_args.kwargs)
 		self.assertEqual(seen["staged_names"], ["dashboard_20260816_084100_item.png"])
 		self.assertIn('"created": true', result)
 
@@ -126,6 +130,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		duplicate = {
 			"classification": "EXACT_DUPLICATE",
 			"created": False,
+			"durable": True,
 			"duplicate_check": {"candidates": [{"name": "Existing"}]},
 		}
 		with patch.object(
@@ -139,7 +144,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				backend_result=duplicate,
 			)
 
-		mark_consumed.assert_called_once_with("batch-1")
+		self.assertEqual(mark_consumed.call_args.args, ("batch-1",))
+		self.assertIn("state_path", mark_consumed.call_args.kwargs)
 		self.assertIn("EXACT_DUPLICATE", result)
 		self.assertIn("requires_user_action", result)
 

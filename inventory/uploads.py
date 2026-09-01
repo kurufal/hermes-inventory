@@ -47,6 +47,7 @@ class PendingUploadBatch:
 	created_at: str
 	updated_at: str
 	expires_at: str
+	state_path: Path | None = None
 
 
 def _utc_now(timestamp: float | None = None) -> datetime:
@@ -435,6 +436,7 @@ def observe_hermes_uploads(
 def _batch_to_result(
 	batch: dict[str, Any],
 	images_dir: Path,
+	state_path: Path,
 ) -> PendingUploadBatch:
 	images = batch.get("images", [])
 	images_root = images_dir.resolve()
@@ -466,6 +468,7 @@ def _batch_to_result(
 		created_at=str(batch.get("created_at", "")),
 		updated_at=str(batch.get("updated_at", "")),
 		expires_at=str(batch.get("expires_at", "")),
+		state_path=state_path,
 	)
 
 
@@ -538,7 +541,7 @@ def resolve_pending_upload_batch(
 			if pending:
 				batch = pending[0]
 				try:
-					result = _batch_to_result(batch, images_dir)
+					result = _batch_to_result(batch, images_dir, state_path)
 				except PendingUploadError:
 					batch["status"] = "expired"
 					batch["updated_at"] = _iso(current)
@@ -550,6 +553,9 @@ def resolve_pending_upload_batch(
 					expires_at = 0
 				if expires_at > current:
 					if claim:
+						batch["status"] = "claimed"
+						batch["updated_at"] = _iso(current)
+						_write_state_locked(state_path, state)
 						_CLAIMED_BATCHES.add(result.batch_id)
 					return result
 				batch["status"] = "expired"
@@ -597,7 +603,7 @@ def mark_pending_upload_consumed(
 		state = _read_state_locked(state_path, logger)
 		for batch in state["batches"]:
 			if isinstance(batch, dict) and batch.get("batch_id") == batch_id:
-				if batch.get("status") == "pending":
+				if batch.get("status") in {"claimed", "processing", "pending"}:
 					batch["status"] = "consumed"
 					batch["updated_at"] = _iso()
 					_write_state_locked(state_path, state)
@@ -610,8 +616,31 @@ def mark_pending_upload_consumed(
 		raise PendingUploadError(f"Pending upload batch not found: {batch_id}")
 
 
-def release_pending_upload_claim(batch_id: str) -> None:
+def mark_pending_upload_processing(batch_id: str, *, state_path: Path, logger: logging.Logger = _LOGGER) -> None:
+	"""Record that a claimed batch is actively being processed."""
 	with _STATE_LOCK:
+		state = _read_state_locked(state_path, logger)
+		for batch in state["batches"]:
+			if isinstance(batch, dict) and batch.get("batch_id") == batch_id:
+				if batch.get("status") not in {"claimed", "processing"}:
+					raise PendingUploadError(f"Pending upload batch is not claimed: {batch_id}")
+				batch["status"] = "processing"
+				batch["updated_at"] = _iso()
+				_write_state_locked(state_path, state)
+				return
+		raise PendingUploadError(f"Pending upload batch not found: {batch_id}")
+
+
+def release_pending_upload_claim(batch_id: str, *, state_path: Path | None = None) -> None:
+	with _STATE_LOCK:
+		if state_path is not None:
+			state = _read_state_locked(state_path)
+			for batch in state["batches"]:
+				if isinstance(batch, dict) and batch.get("batch_id") == batch_id and batch.get("status") in {"claimed", "processing"}:
+					batch["status"] = "pending"
+					batch["updated_at"] = _iso()
+					_write_state_locked(state_path, state)
+					break
 		_CLAIMED_BATCHES.discard(batch_id)
 
 

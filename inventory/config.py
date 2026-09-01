@@ -67,6 +67,26 @@ def _nested_value(payload: dict[str, Any], section: str, key: str, default: Any 
 	return value.get(key, default) if isinstance(value, dict) else default
 
 
+def _load_config_document(hermes_home: Path) -> tuple[dict[str, Any], Path]:
+	json_path = hermes_home / "inventory-config.json"
+	if json_path.is_file():
+		return _read_json_config(json_path), json_path
+	return _read_legacy_yaml(hermes_home / "inventory-config.yaml"), json_path
+
+
+def _boolean(value: Any, name: str, default: bool = False) -> bool:
+	if value is None or value == "":
+		return default
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, str):
+		if value.casefold() in {"true", "1", "yes"}:
+			return True
+		if value.casefold() in {"false", "0", "no"}:
+			return False
+	raise ConfigurationError(f"{name} must be a boolean")
+
+
 def _is_absolute_storage_path(value: str, path: Path) -> bool:
 	return path.is_absolute() or value.startswith("\\\\") or bool(re.match(r"^[A-Za-z]:[\\/]", value))
 
@@ -119,10 +139,7 @@ class InventorySettings:
 
 def get_settings() -> InventorySettings:
 	hermes_home = resolve_hermes_home()
-	config_path = hermes_home / "inventory-config.json"
-	config = _read_json_config(config_path)
-	if not config:
-		config = _read_legacy_yaml(hermes_home / "inventory-config.yaml")
+	config, config_path = _load_config_document(hermes_home)
 
 	def path_setting(env_name: str, config_key: str, default: Path) -> tuple[Path, str]:
 		env_value = _configured_path(os.environ.get(env_name, ""), env_name)
@@ -145,7 +162,7 @@ def get_settings() -> InventorySettings:
 		batch_window_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS", _nested_value(config, "uploads", "batch_window_seconds", 10)), 10),
 		pending_ttl_seconds=_non_negative_float(os.environ.get("INVENTORY_PENDING_UPLOAD_TTL_SECONDS", _nested_value(config, "uploads", "pending_ttl_seconds", 300)), 300),
 		state_retention_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_STATE_RETENTION_SECONDS", _nested_value(config, "uploads", "state_retention_seconds", 86400)), 86400),
-		toon_enabled=bool(_nested_value(config, "toon", "enabled", False)),
+		toon_enabled=_boolean(_nested_value(config, "toon", "enabled", False), "toon.enabled"),
 	)
 
 
@@ -153,7 +170,7 @@ def write_storage_config(persistent_data_dir: Path | None) -> None:
 	"""Atomically merge the non-secret persistent-storage override."""
 	settings = get_settings()
 	settings.config_path.parent.mkdir(parents=True, exist_ok=True)
-	payload = _read_json_config(settings.config_path)
+	payload, _ = _load_config_document(settings.hermes_home)
 	storage = payload.setdefault("storage", {})
 	if not isinstance(storage, dict):
 		raise ConfigurationError("storage must be an object in inventory-config.json")

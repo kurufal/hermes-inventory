@@ -27,6 +27,7 @@ from inventory.config import get_settings, storage_health, write_storage_config
 from inventory.media import is_supported_image
 from inventory.uploads import (
 	PendingUploadError,
+	mark_pending_upload_processing,
 	mark_pending_upload_consumed,
 	resolve_pending_upload_batch,
 	release_pending_upload_claim,
@@ -142,63 +143,6 @@ def _stage_images(image_paths, settings=None):
 	return stage_dir
 
 
-def inventory_command(raw_args="", **kwargs):
-	"""Handle the single non-secret /inventory command namespace."""
-	del kwargs
-	parts = str(raw_args or "").strip().split(maxsplit=1)
-	command = parts[0].casefold() if parts else "help"
-	arguments = parts[1] if len(parts) > 1 else ""
-	settings = get_settings()
-	if command in {"help", ""}:
-		return "Commands: /inventory setup, status, doctor, homebox, storage, uploads, backup, recover, version, help"
-	if command == "version":
-		return "hermes-inventory 0.2.0"
-	if command in {"status", "setup", "doctor"}:
-		ok, reason = storage_health(settings.persistent_data_dir)
-		return "\n".join([f"Hermes home: {settings.hermes_home}", f"Hermes uploads: {settings.hermes_images_dir}", f"Inventory runtime: {settings.runtime_dir} ({settings.runtime_source})", f"Inventory persistent data: {settings.persistent_data_dir} ({settings.persistent_source})", f"Inventory backups: {settings.backup_dir} ({settings.backup_source})", f"Persistent storage: {'PASS' if ok else 'FAIL'} {reason}", f"HomeBox URL: {'configured' if os.environ.get('HOMEBOX_URL') else 'missing'}", f"HomeBox API key: {'configured' if os.environ.get('HOMEBOX_API_KEY') else 'missing'}", f"TOON: {'enabled (adapter unavailable)' if settings.toon_enabled else 'disabled'}"])
-	if command == "storage":
-		operation, _, path = arguments.partition(" ")
-		operation = operation.casefold() or "show"
-		if operation in {"show", "test"}:
-			ok, reason = storage_health(settings.persistent_data_dir)
-			return f"Persistent data: {settings.persistent_data_dir}\nRuntime: {settings.runtime_dir}\nBackups: {settings.backup_dir}\nStorage health: {'PASS' if ok else 'FAIL'} {reason}"
-		if operation == "set" and path:
-			if os.environ.get("INVENTORY_BASE_DIR", "").strip():
-				return "INVENTORY_BASE_DIR environment variable has higher priority and cannot be overridden by plugin config."
-			candidate = Path(path)
-			ok, reason = storage_health(candidate)
-			if not ok:
-				return f"Storage not changed; destination is unavailable: {reason}"
-			write_storage_config(candidate)
-			return f"Storage configured: {candidate}\nPrevious location was not moved."
-		if operation == "reset":
-			write_storage_config(None)
-			return "Storage config reset to the Hermes-home default unless INVENTORY_BASE_DIR is set."
-		return "Usage: /inventory storage [show|test|set <path>|reset]"
-	if command == "uploads":
-		return f"Watched Hermes image directory: {settings.hermes_images_dir}\nPrefixes: dashboard_, upload_, clip_\nRuntime state: {settings.pending_upload_state_path}"
-	if command == "backup":
-		from inventory.backup import create_backup, list_backups, verify_backup
-		operation, _, value = arguments.partition(" ")
-		operation = operation.casefold() or "create"
-		if operation in {"create", ""}:
-			return json.dumps(create_backup(), indent=2)
-		if operation == "list":
-			return "\n".join(str(path) for path in list_backups()) or "No inventory backups found."
-		if operation == "verify":
-			path = Path(value) if value else (list_backups()[0] if list_backups() else None)
-			return json.dumps(verify_backup(path), indent=2) if path else "No inventory backups found."
-		return "Usage: /inventory backup [create|list|verify [path]]"
-	if command == "recover":
-		from inventory.recovery import scan
-		if not arguments or arguments.casefold() in {"status", "scan", "plan"}:
-			return json.dumps(scan(), indent=2)
-		return "Usage: /inventory recover [status|scan|plan]. Automatic apply is not supported."
-	if command == "homebox":
-		return "HomeBox URL and API key are configured through Hermes environment/secrets. Native export/import is unavailable because no verified public API was found in this environment."
-	return f"Unknown Inventory command: {parts[0]}\n\nUse /inventory help to see available commands."
-
-
 def inventory_ingest(
 	image_paths=None,
 	vision_client=None,
@@ -235,7 +179,7 @@ def inventory_ingest(
 		images = _normalize_image_paths(image_paths, settings)
 	except Exception as exc:
 		if pending_batch is not None:
-			release_pending_upload_claim(pending_batch.batch_id)
+			release_pending_upload_claim(pending_batch.batch_id, state_path=pending_batch.state_path)
 		return _json_error(str(exc))
 
 	stage_dir = None
@@ -244,10 +188,9 @@ def inventory_ingest(
 		ingest = _load_inventory_ingest()
 		stage_dir = _stage_images(images, settings)
 		if pending_batch is not None:
-			# Staging succeeded, so the upload has been accepted for processing.
-			# Mark it before vision/HomeBox work so an EXACT_DUPLICATE and a
-			# later processing failure cannot cause accidental reuse.
-			mark_pending_upload_consumed(pending_batch.batch_id)
+			mark_pending_upload_processing(
+				pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path,
+			)
 
 		result = ingest(
 			str(stage_dir), vision_client, settings=settings,
@@ -257,6 +200,10 @@ def inventory_ingest(
 			return _json_error(
 				"Inventory backend returned an unexpected result",
 				backend_result=str(result),
+			)
+		if pending_batch is not None and result.get("durable"):
+			mark_pending_upload_consumed(
+				pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path,
 			)
 
 		result["tool"] = "inventory_ingest"
@@ -300,7 +247,7 @@ def inventory_ingest(
 
 	finally:
 		if pending_batch is not None:
-			release_pending_upload_claim(pending_batch.batch_id)
+			release_pending_upload_claim(pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path)
 		if stage_dir is not None:
 			shutil.rmtree(stage_dir, ignore_errors=True)
 
