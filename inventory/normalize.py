@@ -6,6 +6,26 @@ from inventory.hashing import hash_images
 from inventory.duplicates import build_duplicate_keys
 
 
+TYPE_SYNONYMS = {
+	"book": "Book", "hardcover": "Book", "paperback": "Book", "novel": "Book",
+	"board game": "Board Game", "boardgame": "Board Game", "tabletop game": "Board Game",
+	"video game": "Video Game", "game cartridge": "Video Game",
+	"figure": "Figure / Statue", "statue": "Figure / Statue", "anime figure": "Figure / Statue", "resin statue": "Figure / Statue", "pvc figure": "Figure / Statue",
+	"collectible": "Collectible", "electronics": "Electronics", "computer hardware": "Computer Hardware",
+	"tool": "Tool", "appliance": "Appliance", "media": "Media", "toy": "Toy",
+}
+
+
+def normalize_type(value) -> str:
+	text = " ".join(str(value or "").casefold().replace("-", " ").split())
+	if text in TYPE_SYNONYMS:
+		return TYPE_SYNONYMS[text]
+	for synonym, canonical in TYPE_SYNONYMS.items():
+		if synonym in text:
+			return canonical
+	return "Other"
+
+
 def normalize_record(record: dict) -> dict:
 	result = record.get(
 		"result",
@@ -75,9 +95,7 @@ def normalize_record(record: dict) -> dict:
 			"item_id",
 			"",
 		),
-		"category": value(
-			"object_type"
-		),
+		"category": normalize_type(value("object_type")),
 		"name": value(
 			"product_or_title"
 		),

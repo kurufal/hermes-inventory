@@ -95,6 +95,16 @@ def ingest(source_directory, vision_client, *, settings=None):
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
 		record["asset_id"] = allocate_asset_id(settings)
+		record["field_sources"] = {key: "vision" for key in ("name", "description", "category", "manufacturer", "condition", "identifiers", "attributes", "image_roles")}
+		try:
+			from inventory.homebox import list_entities
+			response = list_entities()
+			entities = response.get("items", []) if isinstance(response, dict) else response
+		except Exception:
+			# HomeBox availability is verified by the regular create path; local reservations still prevent reuse.
+			entities = []
+		if any(str(entity.get("assetId", "")) == record["asset_id"] for entity in entities if isinstance(entity, dict)):
+			raise RuntimeError(f"Asset ID is already in use in HomeBox: {record['asset_id']}")
 		canonicalize_images(record, images_dir)
 		initial = build_manifest(item_id, record, raw, images_dir, status="pending_homebox_create")
 		write_manifest(initial, transaction / "item.json", settings)

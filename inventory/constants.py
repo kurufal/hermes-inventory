@@ -5,4 +5,4 @@ ITEM_SCHEMA = "hermes-inventory-item"
 BACKUP_SCHEMA = "hermes-inventory-backup"
 CATALOG_SCHEMA = "hermes-inventory-catalog"
 OBSERVATION_SCHEMA = "hermes-inventory-observation"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2

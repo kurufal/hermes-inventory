@@ -31,7 +31,7 @@ def scan() -> dict:
 	for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
 		try:
 			manifest = json.loads(path.read_text(encoding="utf-8"))
-			if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") != SCHEMA_VERSION:
+			if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in {1, SCHEMA_VERSION}:
 				report["unsupported_schema_versions"].append(str(path))
 				continue
 		except (OSError, json.JSONDecodeError, ValueError) as exc:

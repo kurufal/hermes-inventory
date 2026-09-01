@@ -5,12 +5,14 @@ photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 
 For an existing canonical item, use `inventory_update`; never bypass Inventory
 with raw HomeBox tools. Route update, change, correct, edit, rename, set,
-purchased at, paid, cost, located at, and move to `operation=edit`. Route
+purchased at, paid, cost, located at, move, tag, and untag to `operation=edit`. Route
 reanalyze, re-analyze, re-evaluate, reevaluate, redo, recheck, and refresh
 analysis to `operation=reanalyze`; route resync to `operation=resync`. Use the
 Asset ID or Inventory ID from the conversation's prior result. Do not guess a
 globally most-recent item without that context. On ambiguity, present the
 candidates and make no mutation.
+If the user wants a different main photo, explain that primary-photo selection is
+managed manually in HomeBox; do not manipulate attachment order or primary state.
 
 When `inventory_ingest` returns `not_configured`, direct the user to
 `/inventory setup`. Do not request or accept a HomeBox API key in chat.

@@ -16,6 +16,7 @@ from typing import Any
 from inventory.config import get_settings
 from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION
 from inventory.media import mime_type
+from inventory.hashing import sha256_file
 
 
 _ASSET_LOCK = threading.Lock()
@@ -39,22 +40,55 @@ def allocate_asset_id(settings, requested: str | None = None) -> str:
 					used.add(str(asset_id))
 			except (OSError, json.JSONDecodeError):
 				continue
+		reservations = settings.persistent_data_dir / ".asset-id-reservations"
+		reservations.mkdir(parents=True, exist_ok=True)
+		used.update(path.stem for path in reservations.glob("*.json") if _ASSET_RE.fullmatch(path.stem))
+		def reserve(candidate):
+			try:
+				fd = os.open(reservations / f"{candidate}.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+				with os.fdopen(fd, "w", encoding="utf-8") as handle:
+					json.dump({"asset_id": candidate, "reserved_at": _timestamp()}, handle)
+				return candidate
+			except FileExistsError:
+				return None
 		if requested:
 			if not _ASSET_RE.fullmatch(requested):
 				raise ValueError("Asset ID must use NNN-NNN format")
 			if requested in used:
 				raise ValueError(f"Asset ID is already in use: {requested}")
-			return requested
+			reserved = reserve(requested)
+			if reserved:
+				return reserved
+			raise ValueError(f"Asset ID is already in use: {requested}")
 		for number in range(1, 1000000):
 			candidate = format_asset_id(number)
 			if candidate not in used:
-				return candidate
+				reserved = reserve(candidate)
+				if reserved:
+					return reserved
 		raise RuntimeError("No Asset IDs remain")
 
 
 def _slug(value: str, limit: int) -> str:
 	value = re.sub(r"[^a-z0-9]+", "-", str(value).casefold()).strip("-")
 	return (value[:limit].strip("-") or "item")
+
+
+_ROLE_ALIASES = {
+	"front cover": "front-cover", "back cover": "back-cover", "copyright page": "copyright-page",
+	"isbn page": "isbn-page", "copyright isbn page": "copyright-isbn-page", "serial number label": "serial-label",
+	"model number label": "model-label", "box front": "box-front", "box back": "box-back",
+	"left side": "left-side", "right side": "right-side",
+}
+
+
+def normalize_image_role(value) -> str:
+	text = " ".join(str(value or "other").replace("_", " ").replace("-", " ").casefold().split())
+	return _ROLE_ALIASES.get(text, _slug(text, 30))
+
+
+def managed_type_tag(category) -> dict[str, str]:
+	return {"name": f"Type: {category or 'Other'}", "source": "system"}
 
 
 def canonical_image_name(asset_id: str, name: str, role: str, extension: str, index: int = 1) -> str:
@@ -68,7 +102,7 @@ def canonicalize_images(record: dict[str, Any], image_dir: Path) -> None:
 	asset_id = record.get("asset_id")
 	if not _ASSET_RE.fullmatch(str(asset_id)):
 		raise ValueError("A valid Asset ID is required before canonicalizing images")
-	roles = {str(entry.get("filename")): str(entry.get("inferred_role") or "image") for entry in record.get("image_roles", []) if isinstance(entry, dict)}
+	roles = {str(entry.get("filename")): normalize_image_role(entry.get("inferred_role")) for entry in record.get("image_roles", []) if isinstance(entry, dict)}
 	mapping, role_counts = [], {}
 	for source_name in record.get("source_images", []):
 		source = image_dir / source_name
@@ -81,15 +115,32 @@ def canonicalize_images(record: dict[str, Any], image_dir: Path) -> None:
 		mapping.append((source_name, target_name))
 	if len({target for _, target in mapping}) != len(mapping):
 		raise RuntimeError("Canonical image names would collide")
+	sources = {source for source, _ in mapping}
+	for source_name, target_name in mapping:
+		if target_name not in sources and (image_dir / target_name).exists():
+			raise RuntimeError(f"Canonical image name already exists: {target_name}")
+	before_hashes = {source: sha256_file(image_dir / source) for source, _ in mapping}
 	temporary = {}
 	for source_name, target_name in mapping:
 		if source_name != target_name:
 			staged = image_dir / f".rename-{uuid.uuid4().hex}"
 			os.replace(image_dir / source_name, staged)
 			temporary[source_name] = staged
+	try:
+		for source_name, target_name in mapping:
+			if source_name != target_name:
+				os.replace(temporary[source_name], image_dir / target_name)
+	except Exception:
+		for source_name, target_name in mapping:
+			if source_name != target_name and (image_dir / target_name).exists():
+				os.replace(image_dir / target_name, image_dir / source_name)
+		for source_name, staged in temporary.items():
+			if staged.exists():
+				os.replace(staged, image_dir / source_name)
+		raise
 	for source_name, target_name in mapping:
-		if source_name != target_name:
-			os.replace(temporary[source_name], image_dir / target_name)
+		if sha256_file(image_dir / target_name) != before_hashes[source_name]:
+			raise RuntimeError(f"Canonical image rename changed bytes: {source_name}")
 	originals = dict(record.get("source_filenames", {}))
 	name_map = dict(mapping)
 	record["source_images"] = [name_map[name] for name in record.get("source_images", [])]
@@ -122,6 +173,27 @@ def atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 		except OSError:
 			pass
 		raise
+
+
+def migrate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+	"""Fill additive v2 fields only when a canonical item is safely loaded."""
+	if manifest.get("schema") != ITEM_SCHEMA:
+		raise ValueError("Not an Inventory item manifest")
+	manifest.setdefault("field_sources", {})
+	manifest.setdefault("history", [])
+	manifest.setdefault("tags", [])
+	manifest.setdefault("location", {"name": None, "path": []})
+	manifest.setdefault("homebox", {"entity_id": None, "attachments": []})
+	for image in manifest.get("images", []):
+		if not isinstance(image, dict):
+			continue
+		filename = Path(str(image.get("relative_path", ""))).name
+		image.setdefault("canonical_filename", filename)
+		image.setdefault("original_filename", image.get("source_filename", filename))
+		image.setdefault("source_filename", image["original_filename"])
+		image.setdefault("role", "other")
+	manifest["schema_version"] = SCHEMA_VERSION
+	return manifest
 
 
 def item_directory(item_id: str, settings=None) -> Path:
@@ -186,8 +258,8 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"item": {"name": record.get("name", ""), "category": record.get("category", ""), "manufacturer": record.get("manufacturer", ""), "description": record.get("physical_description", ""), "condition": record.get("condition", []), "quantity": 1},
 		"identifiers": record.get("identifiers", {}),
 		"attributes": record.get("attributes", []),
-		"tags": [],
-		"location": {"name": None, "path": []},
+		"tags": previous.get("tags", record.get("tags", [managed_type_tag(record.get("category"))])),
+		"location": previous.get("location", record.get("location", {"name": None, "path": []})),
 		"images": _image_entries(record, image_dir),
 		"homebox": homebox or previous.get("homebox", {"entity_id": None, "asset_id": None, "collection_id": None, "entity_type": None, "last_synced_at": None}),
 		"vision": {"raw_metadata_relative_path": "vision.json", "parse_status": raw_metadata.get("parse_status")},
@@ -222,13 +294,13 @@ def write_catalog(settings=None) -> Path:
 		except (OSError, json.JSONDecodeError):
 			corrupt.append(str(candidate))
 			continue
-		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") != SCHEMA_VERSION:
+		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in {1, SCHEMA_VERSION}:
 			corrupt.append(str(candidate))
 			continue
 	if corrupt:
 		raise RuntimeError("Catalog was not replaced because item manifests are invalid: " + ", ".join(corrupt))
 	for candidate in sorted(settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else []:
-		manifest = json.loads(candidate.read_text(encoding="utf-8"))
+		manifest = migrate_manifest(json.loads(candidate.read_text(encoding="utf-8")))
 		item = manifest.get("item", {})
 		images = manifest.get("images", [])
 		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "primary_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})

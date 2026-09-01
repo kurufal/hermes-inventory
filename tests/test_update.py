@@ -75,3 +75,51 @@ class InventoryUpdateTests(unittest.TestCase):
 			result = update_item("9780000000001", "resync", settings=self.settings)
 		self.assertEqual(result["operation"], "resync")
 		self.assertFalse(sync.call_args.kwargs["upload_attachments"])
+
+	def test_asset_id_edit_requires_valid_unused_value(self):
+		with self.assertRaisesRegex(ValueError, "NNN-NNN"):
+			update_item("000-011", "edit", {"asset_id": "book1"}, settings=self.settings)
+		other = self.settings.items_dir / "INV-other"; other.mkdir(parents=True)
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["inventory_id"] = "INV-other"; payload["asset_id"] = "000-025"
+		(other / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		with self.assertRaisesRegex(ValueError, "already in use"):
+			update_item("000-011", "edit", {"asset_id": "000-025"}, settings=self.settings)
+
+	def test_edit_renames_images_and_retains_hash_and_provenance(self):
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"name": "Cyberpunk / No: Coincidence", "asset_id": "000-025"}, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertTrue(all(image["canonical_filename"].startswith("000-025_cyberpunk-no-coincidence_") for image in manifest["images"]))
+		self.assertEqual({image["sha256"] for image in manifest["images"]}, {"x", "y"})
+		self.assertTrue(all(image["original_filename"] == Path(image["source_filename"]).name for image in manifest["images"]))
+
+	def test_reanalysis_refreshes_vision_fields_and_preserves_user_description(self):
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"description": "manual description", "category": "Book", "tags_add": ["Cyberpunk"]}, settings=self.settings)
+		raw = {"source_directory": str(self.item / "images"), "source_images": ["old-front.jpg", "old-page.jpg"], "parse_status": "json_ok", "result": {"object_type": {"value": "electronics"}, "product_or_title": {"value": "New title"}, "manufacturer_or_publisher": {"value": "New maker"}, "physical_description": {"value": "vision description"}, "identifiers": {"serial_number": ["NEW"]}, "condition_observations": [{"observation": "scratched"}], "attributes": [{"name": "Color", "value": "Black"}], "image_roles": [{"filename": "old-front.jpg", "inferred_role": "serial label"}, {"filename": "old-page.jpg", "inferred_role": "back"}]}}
+		with patch("inventory.update.run_vision", return_value=(raw, self.item / "vision.json")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "reanalyze", vision_client=object(), settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["item"]["description"], "manual description")
+		self.assertEqual(manifest["item"]["name"], "New title")
+		self.assertEqual(manifest["identifiers"]["serial_number"], ["NEW"])
+		self.assertEqual(manifest["item"]["condition"][0]["observation"], "scratched")
+		self.assertIn({"name": "Cyberpunk", "source": "user"}, manifest["tags"])
+		self.assertIn({"name": "Type: Book", "source": "system"}, manifest["tags"])
+
+	def test_legacy_manifest_gets_asset_id_and_schema_when_resynced(self):
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload.pop("asset_id"); payload.pop("field_sources"); payload.pop("history"); payload["schema_version"] = 1
+		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item(self.item_id, "resync", settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["schema_version"], 2)
+		self.assertEqual(manifest["asset_id"], "000-001")
+
+	def test_homebox_failure_keeps_local_edit_pending_for_later_resync(self):
+		with patch("inventory.homebox.complete_entity", side_effect=RuntimeError("offline")):
+			result = update_item("000-011", "edit", {"purchase_price": 14.99}, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(result["status"], "updated")
+		self.assertEqual(manifest["status"], "pending_homebox_sync")
+		self.assertEqual(manifest["purchase_price"], 14.99)

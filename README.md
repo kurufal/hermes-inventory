@@ -145,7 +145,15 @@ inventory_update target=000-011 operation=reanalyze
 inventory_update target=000-011 operation=resync
 ```
 
-Edits are marked user-owned and survive later reanalysis. Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg`; manifests retain each original filename and checksum. An ambiguous target produces candidates and does not change anything.
+Edits are marked user-owned and survive later reanalysis. Supported corrections include names, descriptions, type/category, manufacturer, condition, identifiers, attributes, purchase details, locations, notes, and tags. Examples: `This is hardcover, not paperback.`, `Tag 000-011 as Cyberpunk.`, `Update the description of 000-011.`, `Redo the Cyberpunk book.`, and `Resync 000-011.`
+
+**Asset ID vs Inventory ID:** `000-011` is the human-friendly Asset ID used in conversation and HomeBox. `INV-20260901-204535-601208be` is the immutable Inventory ID used for durable storage and recovery.
+
+Inventory normalizes types to Book, Board Game, Video Game, Figure / Statue, Collectible, Electronics, Computer Hardware, Tool, Appliance, Media, Toy, or Other. Its system-managed local tag is `Type: Book` (or the corresponding type); user tags such as `Cyberpunk` are retained independently.
+
+Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg` and `000-011_cyberpunk-2077-no-coincidence_copyright-isbn-page.jpg`. Manifests retain original filenames and hashes, which remain stronger recovery signals than filenames. Primary/display image selection is managed through the HomeBox UI. Inventory never reorders or changes HomeBox primary attachments.
+
+Resync updates metadata without re-uploading existing attachments. The installed HomeBox integration has no verified attachment-metadata rename contract, so attachment display names are not renamed automatically; local canonical filenames remain authoritative.
 
 ## Backup and Recovery
 

@@ -510,29 +510,21 @@ def complete_entity(
 	if not upload_attachments:
 		return {"entity": updated, "attachments": attachments}
 
-	primary_filename = choose_primary_image(
-		record
-	)
-
 	for filename in source_images:
 		image_path = (
 			source_directory
 			/ filename
 		)
 
-		is_primary = (
-			filename == primary_filename
-		)
-
 		result = upload_attachment(
 			entity_id,
 			image_path,
-			primary=is_primary,
+			primary=False,
 		)
 
 		attachments.append({
 			"filename": filename,
-			"primary": is_primary,
+			"primary": False,
 			"result": result,
 		})
 
