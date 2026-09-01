@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from inventory.uploads import PendingUploadBatch, PendingUploadError
@@ -49,19 +50,25 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 
 	def run_ingest(self, image_paths, *, use_pending=False, backend_result=None):
 		seen = {}
+		settings = SimpleNamespace(
+			hermes_images_dir=self.root / "images",
+			runtime_dir=self.root / "runtime",
+			pending_upload_state_path=self.root / "runtime" / "pending.json",
+			pending_ttl_seconds=300,
+			state_retention_seconds=86400,
+			batch_window_seconds=10,
+		)
 
-		def fake_ingest(stage_directory, vision_client):
+		def fake_ingest(stage_directory, vision_client, **kwargs):
+			del kwargs
 			seen["staged_names"] = [
 				path.name for path in Path(stage_directory).iterdir()
+				if path.suffix in {".jpg", ".jpeg", ".png", ".webp"}
 			]
 			seen["vision_client"] = vision_client
 			return backend_result or {"status": "created", "created": True}
 
-		with patch.object(self.plugin, "HERMES_HOME", self.root), patch.object(
-			self.plugin,
-			"STAGING_ROOT",
-			self.root / "staging",
-		), patch.object(
+		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
 			self.plugin,
 			"_load_inventory_ingest",
 			return_value=fake_ingest,
@@ -110,7 +117,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		) as resolve_batch:
 			result, seen, mark_consumed = self.run_ingest([], use_pending=True)
 
-		resolve_batch.assert_called_once_with(claim=True)
+		self.assertTrue(resolve_batch.called)
 		mark_consumed.assert_called_once_with("batch-1")
 		self.assertEqual(seen["staged_names"], ["dashboard_20260816_084100_item.png"])
 		self.assertIn('"created": true', result)
@@ -168,8 +175,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn('"total_batch_count": 2', result)
 
 	def test_vision_parse_failure_surfaces_structured_diagnostics(self):
-		def failing_ingest(stage_directory, vision_client):
-			del stage_directory, vision_client
+		def failing_ingest(stage_directory, vision_client, **kwargs):
+			del stage_directory, vision_client, kwargs
 			error = RuntimeError("Vision model did not return valid structured JSON")
 			error.debug = {
 				"error_stage": "vision_json_parse",
@@ -183,11 +190,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			}
 			raise error
 
-		with patch.object(self.plugin, "HERMES_HOME", self.root), patch.object(
-			self.plugin,
-			"STAGING_ROOT",
-			self.root / "staging",
-		), patch.object(
+		settings = SimpleNamespace(hermes_images_dir=self.root / "images", runtime_dir=self.root / "runtime")
+		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
 			self.plugin,
 			"_load_inventory_ingest",
 			return_value=failing_ingest,

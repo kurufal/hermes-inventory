@@ -15,21 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from inventory.config import (
-	HERMES_IMAGES_DIR,
-	PENDING_UPLOAD_STATE_PATH,
-	PENDING_UPLOAD_TTL_SECONDS,
-	UPLOAD_BATCH_WINDOW_SECONDS,
-	UPLOAD_STATE_RETENTION_SECONDS,
-	UPLOAD_WATCH_INTERVAL_SECONDS,
-)
+from inventory.config import get_settings
+from inventory.media import SUPPORTED_IMAGE_EXTENSIONS, is_supported_image
 
 
 _LOGGER = logging.getLogger("hermes_plugins.hermes_inventory.uploads")
 _DASHBOARD_NAME_RE = re.compile(
 	r"^dashboard_(?P<date>\d{8})_(?P<time>\d{6})(?:_|\.|$)"
 )
-_SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _HERMES_UPLOAD_PREFIXES = ("dashboard_", "upload_", "clip_")
 _STATE_VERSION = 1
 _STABILITY_DELAY_SECONDS = 0.05
@@ -186,8 +179,8 @@ def _expire_and_prune_locked(
 	state: dict[str, Any],
 	now: float,
 	*,
-	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
-	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	ttl_seconds: float,
+	retention_seconds: float,
 	logger: logging.Logger = _LOGGER,
 ) -> bool:
 	changed = False
@@ -228,7 +221,7 @@ def _expire_and_prune_locked(
 def _supported_hermes_upload(path: Path) -> bool:
 	return (
 		path.name.startswith(_HERMES_UPLOAD_PREFIXES)
-		and path.suffix.lower() in _SUPPORTED_IMAGES
+		and is_supported_image(path)
 		and not path.is_symlink()
 		and path.is_file()
 	)
@@ -308,11 +301,11 @@ def _batch_last_event_timestamp(batch: dict[str, Any]) -> float:
 def observe_hermes_uploads(
 	*,
 	now: float | None = None,
-	images_dir: Path = HERMES_IMAGES_DIR,
-	state_path: Path = PENDING_UPLOAD_STATE_PATH,
-	batch_window_seconds: float = UPLOAD_BATCH_WINDOW_SECONDS,
-	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
-	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
+	images_dir: Path | None = None,
+	state_path: Path | None = None,
+	batch_window_seconds: float | None = None,
+	ttl_seconds: float | None = None,
+	retention_seconds: float | None = None,
 	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
 	logger: logging.Logger = _LOGGER,
 ) -> int:
@@ -327,6 +320,12 @@ def observe_hermes_uploads(
 	being merged into one batch.
 	"""
 
+	settings = get_settings()
+	images_dir = images_dir or settings.hermes_images_dir
+	state_path = state_path or settings.pending_upload_state_path
+	batch_window_seconds = settings.batch_window_seconds if batch_window_seconds is None else batch_window_seconds
+	ttl_seconds = settings.pending_ttl_seconds if ttl_seconds is None else ttl_seconds
+	retention_seconds = settings.state_retention_seconds if retention_seconds is None else retention_seconds
 	current = time.time() if now is None else now
 	try:
 		entries = list(images_dir.resolve(strict=True).iterdir())
@@ -435,7 +434,7 @@ def observe_hermes_uploads(
 
 def _batch_to_result(
 	batch: dict[str, Any],
-	images_dir: Path = HERMES_IMAGES_DIR,
+	images_dir: Path,
 ) -> PendingUploadBatch:
 	images = batch.get("images", [])
 	images_root = images_dir.resolve()
@@ -449,7 +448,7 @@ def _batch_to_result(
 			raw_path.is_symlink()
 			or not path.is_file()
 			or path.parent != images_root
-			or path.suffix.lower() not in _SUPPORTED_IMAGES
+			or not is_supported_image(path)
 			or not _supported_hermes_upload(path)
 		):
 			raise PendingUploadError(
@@ -481,11 +480,11 @@ def _count_hermes_upload_candidates(images_dir: Path) -> int:
 def resolve_pending_upload_batch(
 	*,
 	now: float | None = None,
-	images_dir: Path = HERMES_IMAGES_DIR,
-	state_path: Path = PENDING_UPLOAD_STATE_PATH,
-	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
-	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
-	batch_window_seconds: float = UPLOAD_BATCH_WINDOW_SECONDS,
+	images_dir: Path | None = None,
+	state_path: Path | None = None,
+	ttl_seconds: float | None = None,
+	retention_seconds: float | None = None,
+	batch_window_seconds: float | None = None,
 	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
 	claim: bool = False,
 	logger: logging.Logger = _LOGGER,
@@ -499,6 +498,12 @@ def resolve_pending_upload_batch(
 	when the watcher has not run at all.
 	"""
 
+	settings = get_settings()
+	images_dir = images_dir or settings.hermes_images_dir
+	state_path = state_path or settings.pending_upload_state_path
+	ttl_seconds = settings.pending_ttl_seconds if ttl_seconds is None else ttl_seconds
+	retention_seconds = settings.state_retention_seconds if retention_seconds is None else retention_seconds
+	batch_window_seconds = settings.batch_window_seconds if batch_window_seconds is None else batch_window_seconds
 	current = time.time() if now is None else now
 	attempted_reconciliation = False
 	pending_batch_count = 0
@@ -582,11 +587,12 @@ def resolve_pending_upload_batch(
 def mark_pending_upload_consumed(
 	batch_id: str,
 	*,
-	state_path: Path = PENDING_UPLOAD_STATE_PATH,
+	state_path: Path | None = None,
 	logger: logging.Logger = _LOGGER,
 ) -> None:
 	"""Mark a staged pending batch consumed, including duplicate outcomes."""
 
+	state_path = state_path or get_settings().pending_upload_state_path
 	with _STATE_LOCK:
 		state = _read_state_locked(state_path, logger)
 		for batch in state["batches"]:
@@ -625,11 +631,12 @@ def _watcher_loop(
 def start_pending_upload_watcher(
 	*,
 	logger: logging.Logger = _LOGGER,
-	interval_seconds: float = UPLOAD_WATCH_INTERVAL_SECONDS,
+	interval_seconds: float | None = None,
 ) -> bool:
 	"""Start the one process-local daemon watcher, if not already active."""
 
 	global _WATCHER_THREAD
+	interval_seconds = get_settings().watch_interval_seconds if interval_seconds is None else interval_seconds
 	with _WATCHER_LOCK:
 		if _WATCHER_THREAD is not None and _WATCHER_THREAD.is_alive():
 			logger.info("Pending upload watcher already active")

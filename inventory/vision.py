@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from inventory.config import METADATA_DIR
+from inventory.media import MIME_TYPES
 
 
 _LOGGER = logging.getLogger("hermes_plugins.hermes_inventory.vision")
@@ -14,14 +15,6 @@ _LOGGER = logging.getLogger("hermes_plugins.hermes_inventory.vision")
 
 VISION_TASK = "hermes_inventory_vision"
 
-MIME_TYPES = {
-	".jpg": "image/jpeg",
-	".jpeg": "image/jpeg",
-	".png": "image/png",
-	".webp": "image/webp",
-	".gif": "image/gif",
-	".bmp": "image/bmp",
-}
 
 
 BASE_PROMPT = """
@@ -187,6 +180,7 @@ def analyze_directory(
 	vision_client,
 	*,
 	task=VISION_TASK,
+	metadata_path: Path | None = None,
 ):
 	"""Analyze one item directory and persist the raw structured response."""
 
@@ -209,7 +203,9 @@ def analyze_directory(
 			f"No supported images found in {item_dir}"
 		)
 
-	METADATA_DIR.mkdir(parents=True, exist_ok=True)
+	if metadata_path is None:
+		metadata_path = METADATA_DIR / f"{item_dir.name}.json"
+	metadata_path.parent.mkdir(parents=True, exist_ok=True)
 
 	filename_list = "\n".join(
 		f"Image {index + 1}: {image.name}"
@@ -275,9 +271,7 @@ def analyze_directory(
 		"result": parsed,
 	}
 
-	out_file = METADATA_DIR / f"{item_dir.name}.json"
-
-	out_file.write_text(
+	metadata_path.write_text(
 		json.dumps(
 			record,
 			indent=2,
@@ -286,7 +280,7 @@ def analyze_directory(
 		encoding="utf-8",
 	)
 
-	return record, out_file
+	return record, metadata_path
 
 
 def main(argv=None):

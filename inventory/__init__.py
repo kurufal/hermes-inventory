@@ -1,3 +1,5 @@
 """Local inventory backend bundled with the Hermes plugin."""
 
-__version__ = "0.2.0"
+from inventory.constants import PLUGIN_VERSION
+
+__version__ = PLUGIN_VERSION

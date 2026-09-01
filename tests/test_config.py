@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from inventory.config import get_settings, storage_health
+from inventory.config import get_settings, storage_health, write_storage_config
 
 
 class InventorySettingsTests(unittest.TestCase):
@@ -30,3 +30,25 @@ class InventorySettingsTests(unittest.TestCase):
 			path = Path(temporary_directory) / "persistent data"
 			self.assertEqual(storage_health(path), (True, "reachable"))
 			self.assertEqual(list(path.iterdir()), [])
+
+	def test_storage_write_merges_json_and_round_trips_unc(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			config = home / "inventory-config.json"
+			config.write_text('{"storage":{"runtime_dir":"C:\\\\Runtime"},"toon":{"enabled":false},"future":{"value":1}}', encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				unc = Path("\\\\truenas\\Inventory\\Anime Figures")
+				write_storage_config(unc)
+				self.assertEqual(str(get_settings().persistent_data_dir), str(unc))
+			payload = __import__("json").loads(config.read_text(encoding="utf-8"))
+			self.assertEqual(payload["storage"]["runtime_dir"], "C:\\Runtime")
+			self.assertFalse(payload["toon"]["enabled"])
+			self.assertEqual(payload["future"]["value"], 1)
+
+	def test_relative_configured_path_is_rejected(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / "inventory-config.json").write_text('{"storage":{"persistent_data_dir":"relative"}}', encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				with self.assertRaisesRegex(ValueError, "absolute path"):
+					get_settings()

@@ -4,9 +4,9 @@
 
 ## Installation and Settings
 
-Install with Hermes' normal plugin installation command, then install [requirements.txt](requirements.txt) in the Python environment that runs Hermes. Configure `HOMEBOX_URL` and `HOMEBOX_API_KEY` through Hermes' normal environment/secret mechanism. The API key is never stored in plugin YAML, manifests, receipts, backups, status output, or TOON.
+Install with Hermes' normal plugin installation command, then install [requirements.txt](requirements.txt) in the Python environment that runs Hermes. `PyYAML` is used solely for safe one-time reading of legacy YAML configuration; new configuration is JSON. Configure `HOMEBOX_URL` and `HOMEBOX_API_KEY` through Hermes' normal environment/secret mechanism. The API key is never stored in plugin YAML, manifests, receipts, backups, status output, or TOON.
 
-Paths resolve in this order: non-empty environment value, `$HERMES_HOME/inventory-config.yaml`, then the portable default. `HERMES_HOME` is resolved with Hermes' public helper when available; otherwise `HERMES_HOME`, then `~/.hermes` is used. Existing `HERMES_HOME=/opt/data` and `INVENTORY_BASE_DIR` deployments remain supported.
+Paths resolve in this order: non-empty environment value, `$HERMES_HOME/inventory-config.json`, then the portable default. `HERMES_HOME` is resolved with Hermes' public helper when available; otherwise `HERMES_HOME`, then `~/.hermes` is used. Existing `HERMES_HOME=/opt/data` and `INVENTORY_BASE_DIR` deployments remain supported. The JSON configuration is atomically written and updates merge with unknown settings; legacy YAML is read only when PyYAML is installed.
 
 | Purpose | Default | Override |
 | --- | --- | --- |
@@ -30,11 +30,11 @@ On Windows, use UNC storage such as `\\truenas\Inventory\HermesInventory`; it is
 - `/inventory setup`, `status`, `doctor`, `version`, `help`
 - `/inventory storage [show|test|set <path>|reset]`
 - `/inventory uploads [status]`
-- `/inventory homebox [status|test|url]`
+- `/inventory homebox [status|test|help]`
 - `/inventory backup [create|list|verify [path]]`
 - `/inventory recover [status|scan|plan]`
 
-HomeBox URL/key updates remain Hermes configuration responsibilities. Native HomeBox export/import is not triggered because no verified public API was available in this development environment.
+`status` is read-only. `storage test` and `doctor` perform active temporary-file checks. HomeBox URL/key updates remain Hermes configuration responsibilities. Native HomeBox export/import is not triggered because no verified public API was available in this development environment. Slash-command callers are not independently authenticated by the verified public API available here; treat storage configuration commands as operator-only on shared gateways.
 
 ## Durable Evidence and Recovery
 

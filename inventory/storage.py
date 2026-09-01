@@ -5,16 +5,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from inventory.config import get_settings
-
-
-ITEM_SCHEMA = "hermes-inventory-item"
-CATALOG_SCHEMA = "hermes-inventory-catalog"
-SCHEMA_VERSION = 1
+from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION
+from inventory.media import mime_type
 
 
 def _timestamp() -> str:
@@ -39,8 +38,31 @@ def atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 		raise
 
 
-def item_directory(item_id: str) -> Path:
-	return get_settings().items_dir / item_id
+def item_directory(item_id: str, settings=None) -> Path:
+	settings = settings or get_settings()
+	return settings.items_dir / item_id
+
+
+def begin_item_transaction(item_id: str, settings) -> Path:
+	settings.items_dir.mkdir(parents=True, exist_ok=True)
+	transaction = settings.items_dir / f".tmp-{item_id}-{uuid.uuid4().hex}"
+	transaction.mkdir()
+	(transaction / "images").mkdir()
+	return transaction
+
+
+def commit_item_transaction(transaction: Path, item_id: str, settings) -> Path:
+	final = item_directory(item_id, settings)
+	if final.exists():
+		raise FileExistsError(f"Inventory item already exists: {final}")
+	if not (transaction / "item.json").is_file() or not (transaction / "vision.json").is_file():
+		raise RuntimeError("Incomplete inventory transaction cannot be committed.")
+	os.replace(transaction, final)
+	return final
+
+
+def abandon_item_transaction(transaction: Path) -> None:
+	shutil.rmtree(transaction, ignore_errors=True)
 
 
 def _image_entries(record: dict[str, Any], image_dir: Path) -> list[dict[str, Any]]:
@@ -55,8 +77,8 @@ def _image_entries(record: dict[str, Any], image_dir: Path) -> list[dict[str, An
 		result.append({
 			"role": roles.get(name) or "image",
 			"relative_path": f"images/{name}",
-			"source_filename": name,
-			"mime_type": {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}.get(path.suffix.lower(), "application/octet-stream"),
+			"source_filename": record.get("source_filenames", {}).get(name, name),
+			"mime_type": mime_type(path),
 			"sha256": hash_info.get("sha256", ""),
 			"size": path.stat().st_size,
 			"order": index,
@@ -64,8 +86,8 @@ def _image_entries(record: dict[str, Any], image_dir: Path) -> list[dict[str, An
 	return result
 
 
-def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str, Any], image_dir: Path, *, status: str, homebox: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
-	previous = load_manifest(item_id) or {}
+def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str, Any], image_dir: Path, *, status: str, homebox: dict[str, Any] | None = None, error: str | None = None, previous: dict[str, Any] | None = None) -> dict[str, Any]:
+	previous = previous or {}
 	return {
 		"schema": ITEM_SCHEMA,
 		"schema_version": SCHEMA_VERSION,
@@ -73,7 +95,7 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"created_at": previous.get("created_at", _timestamp()),
 		"updated_at": _timestamp(),
 		"status": status,
-		"plugin_version": "0.2.0",
+		"plugin_version": PLUGIN_VERSION,
 		"item": {"name": record.get("name", ""), "category": record.get("category", ""), "manufacturer": record.get("manufacturer", ""), "description": record.get("physical_description", ""), "condition": record.get("condition", []), "quantity": 1},
 		"identifiers": record.get("identifiers", {}),
 		"attributes": record.get("attributes", []),
@@ -86,14 +108,14 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 	}
 
 
-def write_manifest(manifest: dict[str, Any]) -> Path:
-	path = item_directory(str(manifest["inventory_id"])) / "item.json"
+def write_manifest(manifest: dict[str, Any], path: Path | None = None, settings=None) -> Path:
+	path = path or item_directory(str(manifest["inventory_id"]), settings) / "item.json"
 	atomic_json_write(path, manifest)
 	return path
 
 
-def load_manifest(item_id: str) -> dict[str, Any] | None:
-	path = item_directory(item_id) / "item.json"
+def load_manifest(item_id: str, settings=None) -> dict[str, Any] | None:
+	path = item_directory(item_id, settings) / "item.json"
 	try:
 		payload = json.loads(path.read_text(encoding="utf-8"))
 	except (OSError, json.JSONDecodeError):
@@ -101,14 +123,23 @@ def load_manifest(item_id: str) -> dict[str, Any] | None:
 	return payload if payload.get("schema") == ITEM_SCHEMA else None
 
 
-def write_catalog() -> Path:
-	settings = get_settings()
+def write_catalog(settings=None) -> Path:
+	settings = settings or get_settings()
 	items = []
+	corrupt = []
 	for candidate in sorted(settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else []:
 		try:
 			manifest = json.loads(candidate.read_text(encoding="utf-8"))
 		except (OSError, json.JSONDecodeError):
+			corrupt.append(str(candidate))
 			continue
+		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") != SCHEMA_VERSION:
+			corrupt.append(str(candidate))
+			continue
+	if corrupt:
+		raise RuntimeError("Catalog was not replaced because item manifests are invalid: " + ", ".join(corrupt))
+	for candidate in sorted(settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else []:
+		manifest = json.loads(candidate.read_text(encoding="utf-8"))
 		item = manifest.get("item", {})
 		images = manifest.get("images", [])
 		items.append({"inventory_id": manifest.get("inventory_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "primary_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})

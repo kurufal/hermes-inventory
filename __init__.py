@@ -23,7 +23,8 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
 	sys.path.insert(0, _PLUGIN_DIR)
 
-from inventory.config import HERMES_HOME, STAGING_DIR, get_settings, storage_health, write_storage_config
+from inventory.config import get_settings, storage_health, write_storage_config
+from inventory.media import is_supported_image
 from inventory.uploads import (
 	PendingUploadError,
 	mark_pending_upload_consumed,
@@ -33,15 +34,6 @@ from inventory.uploads import (
 )
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
-STAGING_ROOT = STAGING_DIR
-SUPPORTED_IMAGES = {
-	".png",
-	".jpg",
-	".jpeg",
-	".gif",
-	".webp",
-	".bmp",
-}
 
 # These are plugin defaults, not hard overrides. Hermes operator configuration
 # under auxiliary.hermes_inventory_vision takes precedence when present. The
@@ -59,7 +51,8 @@ def _json_error(message: str, **extra) -> str:
 	return json.dumps(payload, indent=2)
 
 
-def _normalize_image_paths(raw_paths):
+def _normalize_image_paths(raw_paths, settings=None):
+	settings = settings or get_settings()
 	if isinstance(raw_paths, str):
 		raw_paths = [raw_paths]
 
@@ -87,7 +80,7 @@ def _normalize_image_paths(raw_paths):
 		if not path.is_file():
 			raise ValueError(f"Attached image is not a regular file: {path}")
 
-		if path.suffix.lower() not in SUPPORTED_IMAGES:
+		if not is_supported_image(path):
 			raise ValueError(
 				f"Unsupported image type: {path.name}"
 			)
@@ -96,7 +89,7 @@ def _normalize_image_paths(raw_paths):
 		# Keeping this restriction prevents arbitrary host-file ingestion
 		# through model-generated paths.
 		try:
-			path.relative_to((HERMES_HOME / "images").resolve())
+			path.relative_to(settings.hermes_images_dir.resolve())
 		except ValueError:
 			raise ValueError(
 				f"Image path is outside HERMES_HOME and was refused: {path}"
@@ -124,12 +117,14 @@ def _load_inventory_ingest():
 	return ingest
 
 
-def _stage_images(image_paths):
-	staging_root = STAGING_ROOT
+def _stage_images(image_paths, settings=None):
+	settings = settings or get_settings()
+	staging_root = settings.runtime_dir / "tool-staging"
 	staging_root.mkdir(parents=True, exist_ok=True)
 
 	stage_dir = staging_root / f"ingest-{uuid.uuid4().hex}"
 	stage_dir.mkdir(parents=True, exist_ok=False)
+	provenance = {}
 
 	for index, source in enumerate(image_paths, start=1):
 		destination = stage_dir / source.name
@@ -138,6 +133,11 @@ def _stage_images(image_paths):
 			destination = stage_dir / f"{index:02d}_{source.name}"
 
 		shutil.copy2(source, destination)
+		provenance[destination.name] = source.name
+
+	(stage_dir / ".inventory-provenance.json").write_text(
+		json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
+	)
 
 	return stage_dir
 
@@ -206,11 +206,18 @@ def inventory_ingest(
 ):
 	"""Ingest one physical item represented by attached photographs."""
 
+	settings = get_settings()
 	pending_batch = None
 	using_pending_upload = not image_paths and use_pending_upload is True
 	if using_pending_upload:
 		try:
-			pending_batch = resolve_pending_upload_batch(claim=True)
+			pending_batch = resolve_pending_upload_batch(
+				claim=True, images_dir=settings.hermes_images_dir,
+				state_path=settings.pending_upload_state_path,
+				ttl_seconds=settings.pending_ttl_seconds,
+				retention_seconds=settings.state_retention_seconds,
+				batch_window_seconds=settings.batch_window_seconds,
+			)
 			image_paths = [str(path) for path in pending_batch.image_paths]
 		except PendingUploadError as exc:
 			return _json_error(
@@ -225,7 +232,7 @@ def inventory_ingest(
 		)
 
 	try:
-		images = _normalize_image_paths(image_paths)
+		images = _normalize_image_paths(image_paths, settings)
 	except Exception as exc:
 		if pending_batch is not None:
 			release_pending_upload_claim(pending_batch.batch_id)
@@ -235,7 +242,7 @@ def inventory_ingest(
 
 	try:
 		ingest = _load_inventory_ingest()
-		stage_dir = _stage_images(images)
+		stage_dir = _stage_images(images, settings)
 		if pending_batch is not None:
 			# Staging succeeded, so the upload has been accepted for processing.
 			# Mark it before vision/HomeBox work so an EXACT_DUPLICATE and a
@@ -243,8 +250,7 @@ def inventory_ingest(
 			mark_pending_upload_consumed(pending_batch.batch_id)
 
 		result = ingest(
-			str(stage_dir),
-			vision_client,
+			str(stage_dir), vision_client, settings=settings,
 		)
 
 		if not isinstance(result, dict):
@@ -297,6 +303,10 @@ def inventory_ingest(
 			release_pending_upload_claim(pending_batch.batch_id)
 		if stage_dir is not None:
 			shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+# Kept as a compatibility name above; command implementation lives separately.
+from inventory.commands import inventory_command
 
 
 def register(ctx):

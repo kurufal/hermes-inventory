@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import os
+import json
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -24,27 +26,58 @@ def resolve_hermes_home() -> Path:
 	return Path(configured).expanduser() if configured else Path.home() / ".hermes"
 
 
-def _read_config(path: Path) -> dict[str, str]:
-	"""Read the supported small YAML subset without making PyYAML mandatory."""
+class ConfigurationError(ValueError):
+	"""Raised when plugin-owned non-secret configuration is invalid."""
+
+
+def _read_json_config(path: Path) -> dict[str, Any]:
 	if not path.is_file():
 		return {}
-	values: dict[str, str] = {}
-	section = ""
 	try:
-		for raw_line in path.read_text(encoding="utf-8").splitlines():
-			line = raw_line.strip()
-			if not line or line.startswith("#"):
-				continue
-			if raw_line == raw_line.lstrip() and line.endswith(":"):
-				section = line[:-1].strip()
-				continue
-			if ":" not in line or not section:
-				continue
-			key, value = line.split(":", 1)
-			values[f"{section}.{key.strip()}"] = value.strip().strip("\"'")
-	except OSError:
+		payload = json.loads(path.read_text(encoding="utf-8"))
+	except (OSError, json.JSONDecodeError) as exc:
+		raise ConfigurationError(f"Malformed inventory configuration {path}: {exc}") from exc
+	if not isinstance(payload, dict):
+		raise ConfigurationError(f"Inventory configuration {path} must be a JSON object.")
+	return payload
+
+
+def _read_legacy_yaml(path: Path) -> dict[str, Any]:
+	"""Read legacy config only with a real YAML parser; never emulate YAML."""
+	if not path.is_file():
 		return {}
-	return values
+	try:
+		import yaml
+	except ImportError as exc:
+		raise ConfigurationError(
+			f"Legacy configuration {path} requires PyYAML for one-time migration; "
+			"create inventory-config.json instead."
+		) from exc
+	try:
+		payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+	except (OSError, yaml.YAMLError) as exc:
+		raise ConfigurationError(f"Malformed legacy inventory configuration {path}: {exc}") from exc
+	if not isinstance(payload, dict):
+		raise ConfigurationError(f"Legacy configuration {path} must be a mapping.")
+	return payload
+
+
+def _nested_value(payload: dict[str, Any], section: str, key: str, default: Any = "") -> Any:
+	value = payload.get(section, {})
+	return value.get(key, default) if isinstance(value, dict) else default
+
+
+def _is_absolute_storage_path(value: str, path: Path) -> bool:
+	return path.is_absolute() or value.startswith("\\\\") or bool(re.match(r"^[A-Za-z]:[\\/]", value))
+
+
+def _configured_path(value: Any, name: str) -> Path | None:
+	if not isinstance(value, str) or not value.strip():
+		return None
+	path = Path(value)
+	if not _is_absolute_storage_path(value, path):
+		raise ConfigurationError(f"{name} must be an absolute path: {value}")
+	return path.expanduser()
 
 
 def _non_negative_float(value: Any, default: float) -> float:
@@ -86,16 +119,19 @@ class InventorySettings:
 
 def get_settings() -> InventorySettings:
 	hermes_home = resolve_hermes_home()
-	config_path = hermes_home / "inventory-config.yaml"
-	config = _read_config(config_path)
+	config_path = hermes_home / "inventory-config.json"
+	config = _read_json_config(config_path)
+	if not config:
+		config = _read_legacy_yaml(hermes_home / "inventory-config.yaml")
 
 	def path_setting(env_name: str, config_key: str, default: Path) -> tuple[Path, str]:
-		env_value = os.environ.get(env_name, "").strip()
-		if env_value:
-			return Path(env_value).expanduser(), f"{env_name} environment variable"
-		config_value = config.get(config_key, "").strip()
-		if config_value:
-			return Path(config_value).expanduser(), "plugin config"
+		env_value = _configured_path(os.environ.get(env_name, ""), env_name)
+		if env_value is not None:
+			return env_value, f"{env_name} environment variable"
+		section, key = config_key.split(".", 1)
+		config_value = _configured_path(_nested_value(config, section, key), config_key)
+		if config_value is not None:
+			return config_value, "plugin config"
 		return default, "default"
 
 	persistent, persistent_source = path_setting("INVENTORY_BASE_DIR", "storage.persistent_data_dir", hermes_home / "inventory")
@@ -105,23 +141,28 @@ def get_settings() -> InventorySettings:
 		hermes_home=hermes_home, persistent_data_dir=persistent, runtime_dir=runtime,
 		backup_dir=backup, config_path=config_path, persistent_source=persistent_source,
 		runtime_source=runtime_source, backup_source=backup_source,
-		watch_interval_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS", config.get("uploads.watch_interval_seconds", 1)), 1),
-		batch_window_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS", config.get("uploads.batch_window_seconds", 10)), 10),
-		pending_ttl_seconds=_non_negative_float(os.environ.get("INVENTORY_PENDING_UPLOAD_TTL_SECONDS", config.get("uploads.pending_ttl_seconds", 300)), 300),
-		state_retention_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_STATE_RETENTION_SECONDS", config.get("uploads.state_retention_seconds", 86400)), 86400),
-		toon_enabled=config.get("toon.enabled", "true").casefold() not in {"0", "false", "no"},
+		watch_interval_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS", _nested_value(config, "uploads", "watch_interval_seconds", 1)), 1),
+		batch_window_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS", _nested_value(config, "uploads", "batch_window_seconds", 10)), 10),
+		pending_ttl_seconds=_non_negative_float(os.environ.get("INVENTORY_PENDING_UPLOAD_TTL_SECONDS", _nested_value(config, "uploads", "pending_ttl_seconds", 300)), 300),
+		state_retention_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_STATE_RETENTION_SECONDS", _nested_value(config, "uploads", "state_retention_seconds", 86400)), 86400),
+		toon_enabled=bool(_nested_value(config, "toon", "enabled", False)),
 	)
 
 
 def write_storage_config(persistent_data_dir: Path | None) -> None:
-	"""Atomically save only the non-secret persistent-storage override."""
+	"""Atomically merge the non-secret persistent-storage override."""
 	settings = get_settings()
 	settings.config_path.parent.mkdir(parents=True, exist_ok=True)
-	value = "" if persistent_data_dir is None else str(persistent_data_dir)
+	payload = _read_json_config(settings.config_path)
+	storage = payload.setdefault("storage", {})
+	if not isinstance(storage, dict):
+		raise ConfigurationError("storage must be an object in inventory-config.json")
+	storage["persistent_data_dir"] = "" if persistent_data_dir is None else str(_configured_path(str(persistent_data_dir), "storage.persistent_data_dir"))
 	fd, temporary_name = tempfile.mkstemp(prefix=".inventory-config-", suffix=".tmp", dir=settings.config_path.parent)
 	try:
 		with os.fdopen(fd, "w", encoding="utf-8") as handle:
-			handle.write("storage:\n  persistent_data_dir: " + repr(value) + "\n")
+			json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
+			handle.write("\n")
 			handle.flush()
 			os.fsync(handle.fileno())
 		os.replace(temporary_name, settings.config_path)
