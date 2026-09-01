@@ -55,6 +55,8 @@ def _record(manifest, image_directory):
 		"attributes": manifest.get("attributes", []), "source_directory": str(image_directory),
 		"purchase_price": manifest.get("purchase_price"), "purchase_from": manifest.get("purchase_from", ""),
 		"purchase_date": manifest.get("purchase_date", ""), "notes": manifest.get("notes", ""),
+		"tags": manifest.get("tags", []),
+		"managed_tag_names": manifest.get("homebox", {}).get("managed_tag_names", []),
 		"source_images": [Path(image.get("relative_path", "")).name for image in manifest.get("images", [])],
 		"image_hashes": [{"filename": Path(image.get("relative_path", "")).name, "sha256": image.get("sha256", "")} for image in manifest.get("images", [])],
 		"image_roles": [{"filename": Path(image.get("relative_path", "")).name, "inferred_role": image.get("role", "other")} for image in manifest.get("images", [])],
@@ -78,9 +80,30 @@ def _apply_changes(manifest, changes):
 		elif key == "location":
 			old = manifest.get("location"); manifest["location"] = {"name": value, "path": []} if isinstance(value, str) else value
 		elif key == "identifiers":
-			old = manifest.get("identifiers"); manifest["identifiers"] = value
+			old = manifest.get("identifiers", {})
+			merged = {str(existing_key): list(existing_values) for existing_key, existing_values in old.items() if isinstance(existing_values, list)}
+			for incoming_key, incoming_values in value.items():
+				matched_key = next((existing_key for existing_key in merged if existing_key.casefold() == str(incoming_key).casefold()), str(incoming_key))
+				merged[matched_key] = list(dict.fromkeys(str(entry) for entry in incoming_values if str(entry)))
+				sources[f"identifiers.{matched_key}"] = "user"
+			manifest["identifiers"] = merged; value = merged
 		elif key == "attributes":
-			old = manifest.get("attributes"); manifest["attributes"] = value
+			old = manifest.get("attributes", [])
+			merged, positions = [], {}
+			for attribute in old:
+				if not isinstance(attribute, dict) or not str(attribute.get("name", "")).strip():
+					continue
+				attribute_key = str(attribute["name"]).strip().casefold()
+				if attribute_key not in positions:
+					positions[attribute_key] = len(merged); merged.append(attribute)
+			for attribute in value:
+				if not isinstance(attribute, dict) or not str(attribute.get("name", "")).strip():
+					continue
+				attribute_key = str(attribute["name"]).strip().casefold()
+				if attribute_key in positions: merged[positions[attribute_key]] = attribute
+				else: positions[attribute_key] = len(merged); merged.append(attribute)
+				sources[f"attributes.{str(attribute.get('name')).casefold()}"] = "user"
+			manifest["attributes"] = merged; value = merged
 		elif key == "asset_id":
 			old = manifest.get("asset_id"); manifest["asset_id"] = str(value)
 		elif key == "tags_add":
@@ -91,7 +114,8 @@ def _apply_changes(manifest, changes):
 			manifest["tags"] = [tag for tag in old if not (str(tag.get("name", "")).casefold() in remove and tag.get("source") != "system")]
 		else:
 			continue
-		sources[key] = "user"
+		if key not in {"attributes", "identifiers"}:
+			sources[key] = "user"
 		changes_log[key] = {"old": old, "new": value}
 	return changes_log
 
@@ -100,6 +124,9 @@ def _reconcile_managed_type_tag(manifest):
 	managed = managed_type_tag(manifest.get("item", {}).get("category"))
 	user_tags = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
 	manifest["tags"] = [managed, *user_tags]
+	homebox = manifest.setdefault("homebox", {})
+	current_names = [str(tag.get("name", "")) for tag in manifest["tags"] if isinstance(tag, dict) and tag.get("source") in {"system", "user"}]
+	homebox["managed_tag_names"] = list(dict.fromkeys([*homebox.get("managed_tag_names", []), *current_names]))
 
 
 def _asset_id_available(asset_id, manifest, settings):
@@ -153,13 +180,27 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 		raw, _ = run_vision(images, vision_client, metadata_path=root / "vision.json")
 		fresh = normalize_record(raw)
 		changes_log = {}
-		for key, field, fresh_key in (("name", "name", "name"), ("category", "category", "category"), ("manufacturer", "manufacturer", "manufacturer"), ("description", "description", "physical_description"), ("condition", "condition", "condition"), ("identifiers", "identifiers", "identifiers"), ("attributes", "attributes", "attributes")):
+		for key, field, fresh_key in (("name", "name", "name"), ("category", "category", "category"), ("manufacturer", "manufacturer", "manufacturer"), ("description", "description", "physical_description"), ("condition", "condition", "condition")):
 			if manifest.get("field_sources", {}).get(key) != "user":
-				if key in {"identifiers", "attributes"}:
-					old = manifest.get(key); manifest[key] = fresh.get(fresh_key, old)
-				else:
-					old = manifest["item"].get(field); manifest["item"][field] = fresh.get(fresh_key, old)
+				old = manifest["item"].get(field); manifest["item"][field] = fresh.get(fresh_key, old)
 				changes_log[key] = {"old": old, "new": fresh.get(fresh_key, old)}
+		for key in ("identifiers", "attributes"):
+			current = manifest.get(key, {}) if key == "identifiers" else manifest.get(key, [])
+			incoming = fresh.get(key, {}) if key == "identifiers" else fresh.get(key, [])
+			if key == "identifiers":
+				merged = dict(current)
+				for incoming_key, values in incoming.items():
+					matched = next((existing_key for existing_key in merged if existing_key.casefold() == str(incoming_key).casefold()), str(incoming_key))
+					if manifest.get("field_sources", {}).get(f"identifiers.{matched}") != "user": merged[matched] = values
+			else:
+				merged = list(current); positions = {str(attribute.get("name", "")).casefold(): index for index, attribute in enumerate(merged) if isinstance(attribute, dict)}
+				for attribute in incoming:
+					if not isinstance(attribute, dict): continue
+					name = str(attribute.get("name", "")); index = positions.get(name.casefold())
+					if manifest.get("field_sources", {}).get(f"attributes.{name.casefold()}") == "user": continue
+					if index is None: positions[name.casefold()] = len(merged); merged.append(attribute)
+					else: merged[index] = attribute
+			old = manifest.get(key); manifest[key] = merged; changes_log[key] = {"old": old, "new": merged}
 		if manifest.get("field_sources", {}).get("image_roles") != "user":
 			for image in manifest.get("images", []):
 				name = Path(image.get("relative_path", "")).name

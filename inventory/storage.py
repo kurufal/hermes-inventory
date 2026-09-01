@@ -303,7 +303,7 @@ def write_catalog(settings=None) -> Path:
 		manifest = migrate_manifest(json.loads(candidate.read_text(encoding="utf-8")))
 		item = manifest.get("item", {})
 		images = manifest.get("images", [])
-		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "primary_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})
+		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "preview_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})
 	path = settings.persistent_data_dir / "catalog.json"
 	atomic_json_write(path, {"schema": CATALOG_SCHEMA, "schema_version": SCHEMA_VERSION, "updated_at": _timestamp(), "items": items})
 	return path

@@ -68,6 +68,41 @@ def list_entities():
 	return response.json()
 
 
+def list_tags():
+	response = requests.get(f"{_base_url()}/api/v1/tags", headers=auth_headers(), timeout=HOMEBOX_TIMEOUT_SECONDS)
+	response.raise_for_status()
+	payload = response.json()
+	return payload.get("items", []) if isinstance(payload, dict) else payload
+
+
+def create_tag(name):
+	response = requests.post(f"{_base_url()}/api/v1/tags", headers=json_headers(), json={"name": name}, timeout=HOMEBOX_TIMEOUT_SECONDS)
+	response.raise_for_status()
+	return response.json()
+
+
+def synchronized_tag_ids(current_tags, inventory_tags, managed_names=()):
+	"""Return HomeBox tag IDs for Inventory tags plus unrelated existing tags."""
+	available = list_tags()
+	by_name = {str(tag.get("name", "")).casefold(): tag for tag in available if isinstance(tag, dict) and tag.get("id")}
+	desired = [tag for tag in inventory_tags if isinstance(tag, dict) and tag.get("source") in {"system", "user"}]
+	# Inventory owns Type tags; unrelated HomeBox tags, including all non-Type tags, survive.
+	managed_names = {str(name).casefold() for name in managed_names}
+	retained = [tag for tag in current_tags if isinstance(tag, dict) and tag.get("id") and not str(tag.get("name", "")).casefold().startswith("type:") and str(tag.get("name", "")).casefold() not in managed_names]
+	for tag in desired:
+		name = str(tag.get("name", "")).strip()
+		if not name:
+			continue
+		entry = by_name.get(name.casefold())
+		if entry is None:
+			entry = create_tag(name)
+			if entry.get("id"):
+				by_name[name.casefold()] = entry
+		if entry.get("id"):
+			retained.append(entry)
+	return list(dict.fromkeys(str(tag["id"]) for tag in retained))
+
+
 def get_entity(entity_id):
 	response = requests.get(
 		f"{_base_url()}/api/v1/entities/{entity_id}",
@@ -302,14 +337,7 @@ def update_entity(entity_id, record):
 				False,
 			)
 		),
-		"tagIds": [
-			tag["id"]
-			for tag in current.get(
-				"tags",
-				[],
-			)
-			if "id" in tag
-		],
+		"tagIds": synchronized_tag_ids(current.get("tags", []), record.get("tags", []), record.get("managed_tag_names", [])),
 		"fields": build_homebox_fields(
 			record,
 			current.get(
@@ -339,7 +367,6 @@ def update_entity(entity_id, record):
 def upload_attachment(
 	entity_id,
 	path,
-	primary=False,
 ):
 	path = Path(path)
 
@@ -356,14 +383,7 @@ def upload_attachment(
 			)
 		}
 
-		data = {
-			"name": path.name,
-			"primary": (
-				"true"
-				if primary
-				else "false"
-			),
-		}
+		data = {"name": path.name}
 
 		response = requests.post(
 			(
@@ -396,90 +416,6 @@ def upload_attachment(
 	return {
 		"status_code": response.status_code,
 	}
-
-
-def choose_primary_image(record):
-	source_images = record.get(
-		"source_images",
-		[],
-	)
-
-	if not source_images:
-		return None
-
-	preferred_terms = (
-		"front cover",
-		"front view",
-		"front",
-		"primary",
-		"overview",
-		"overall",
-		"exterior",
-		"main",
-	)
-
-	roles = record.get(
-		"image_roles",
-		[],
-	)
-
-	candidates = []
-
-	for role in roles:
-		filename = role.get(
-			"filename",
-			"",
-		)
-
-		inferred_role = str(
-			role.get(
-				"inferred_role",
-				"",
-			)
-		).lower()
-
-		try:
-			confidence = float(
-				role.get(
-					"confidence",
-					0.0,
-				)
-				or 0.0
-			)
-		except (TypeError, ValueError):
-			confidence = 0.0
-
-		if filename not in source_images:
-			continue
-
-		score = 0
-
-		for index, term in enumerate(
-			preferred_terms
-		):
-			if term in inferred_role:
-				score = (
-					100 - index
-				)
-				break
-
-		candidates.append(
-			(
-				score,
-				confidence,
-				filename,
-			)
-		)
-
-	if candidates:
-		candidates.sort(
-			reverse=True
-		)
-
-		if candidates[0][0] > 0:
-			return candidates[0][2]
-
-	return source_images[0]
 
 
 def complete_entity(
@@ -519,7 +455,6 @@ def complete_entity(
 		result = upload_attachment(
 			entity_id,
 			image_path,
-			primary=False,
 		)
 
 		attachments.append({

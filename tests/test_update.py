@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from inventory.storage import format_asset_id
+from inventory.homebox import synchronized_tag_ids
+from inventory.storage import format_asset_id, write_catalog
 from inventory.update import update_item
 
 
@@ -47,7 +48,7 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(manifest["inventory_id"], self.item_id)
 		self.assertEqual(manifest["purchase_price"], 14.99)
 		self.assertEqual(manifest["attributes"][0]["value"], "Hardcover")
-		self.assertEqual(manifest["field_sources"]["attributes"], "user")
+		self.assertEqual(manifest["field_sources"]["attributes.format"], "user")
 		self.assertEqual(len(manifest["images"]), 2)
 		self.assertEqual(manifest["history"][-1]["operation"], "edit")
 		homebox.assert_called_once()
@@ -123,3 +124,55 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(result["status"], "updated")
 		self.assertEqual(manifest["status"], "pending_homebox_sync")
 		self.assertEqual(manifest["purchase_price"], 14.99)
+
+	def test_partial_attributes_merge_case_insensitively_without_duplicates(self):
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["attributes"] += [{"name": "Edition", "value": "First"}, {"name": "Language", "value": "English"}]
+		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"attributes": [{"name": "format", "value": "Hardcover"}, {"name": "Publisher", "value": "Orbit"}]}, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual({attribute["name"].casefold(): attribute["value"] for attribute in manifest["attributes"]}, {"format": "Hardcover", "edition": "First", "language": "English", "publisher": "Orbit"})
+		self.assertEqual(manifest["field_sources"]["attributes.format"], "user")
+
+	def test_partial_identifiers_merge_without_removing_siblings(self):
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["identifiers"]["upc"] = ["123"]
+		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"identifiers": {"ISBN_13": ["9780759555952", "9780759555952"]}}, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["identifiers"]["isbn_13"], ["9780759555952"])
+		self.assertEqual(manifest["identifiers"]["upc"], ["123"])
+		self.assertEqual(manifest["field_sources"]["identifiers.isbn_13"], "user")
+
+	def test_user_owned_identifier_survives_reanalysis(self):
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"identifiers": {"isbn_13": ["manual"]}}, settings=self.settings)
+		raw = {"source_directory": str(self.item / "images"), "source_images": ["old-front.jpg"], "parse_status": "json_ok", "result": {"identifiers": {"isbn_13": ["vision"], "upc": ["123"]}}}
+		with patch("inventory.update.run_vision", return_value=(raw, self.item / "vision.json")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "reanalyze", vision_client=object(), settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["identifiers"]["isbn_13"], ["manual"])
+		self.assertEqual(manifest["identifiers"]["upc"], ["123"])
+
+	def test_homebox_tags_reuse_create_and_preserve_unrelated_tags(self):
+		current = [{"id": "signed", "name": "Signed"}, {"id": "old-type", "name": "Type: Collectible"}]
+		local = [{"name": "Type: Book", "source": "system"}, {"name": "Cyberpunk", "source": "user"}]
+		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "type: book"}, {"id": "cyberpunk", "name": "Cyberpunk"}]), patch("inventory.homebox.create_tag") as create:
+			self.assertEqual(synchronized_tag_ids(current, local), ["signed", "book", "cyberpunk"])
+		create.assert_not_called()
+		with patch("inventory.homebox.list_tags", return_value=[]), patch("inventory.homebox.create_tag", side_effect=[{"id": "book", "name": "Type: Book"}, {"id": "cyber", "name": "Cyberpunk"}]) as create:
+			self.assertEqual(synchronized_tag_ids(current, local), ["signed", "book", "cyber"])
+		self.assertEqual(create.call_count, 2)
+
+	def test_homebox_tag_removal_and_repeat_are_idempotent(self):
+		current = [{"id": "signed", "name": "Signed"}, {"id": "cyber", "name": "Cyberpunk"}, {"id": "book", "name": "Type: Book"}]
+		local = [{"name": "Type: Book", "source": "system"}]
+		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "Type: Book"}]):
+			self.assertEqual(synchronized_tag_ids(current, local, ["Type: Book", "Cyberpunk"]), ["signed", "book"])
+			self.assertEqual(synchronized_tag_ids(current, local, ["Type: Book", "Cyberpunk"]), ["signed", "book"])
+
+	def test_catalog_uses_neutral_preview_field(self):
+		write_catalog(self.settings)
+		catalog = json.loads((self.root / "catalog.json").read_text(encoding="utf-8"))
+		self.assertIn("preview_image_relative_path", catalog["items"][0])
+		self.assertNotIn("primary_image_relative_path", catalog["items"][0])
