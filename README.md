@@ -151,6 +151,21 @@ Edits are marked user-owned and survive later reanalysis. Supported corrections 
 
 Inventory normalizes types to Book, Board Game, Video Game, Figure / Statue, Collectible, Electronics, Computer Hardware, Tool, Appliance, Media, Toy, or Other. The managed `Type: Book` tag (or corresponding type) and explicit user tags such as `Cyberpunk` synchronize to HomeBox. Existing unrelated HomeBox tags are preserved.
 
+HomeBox owns the tag vocabulary. Create tags in HomeBox, then Inventory matches existing tags by name and does not create new HomeBox tags automatically. The canonical category is matched directly, so local `Book` classification uses a HomeBox `Book` tag when it exists; explicit user tags follow the same rule.
+
+## Search
+
+Use `inventory_search` to query the local canonical Inventory without changing it:
+
+```text
+Check my inventory for The Martian.
+Do I have Cyberpunk 2077?
+What's item 000-011?
+Show me my board games.
+```
+
+Search matches Asset ID, Inventory ID, names, descriptions, categories, identifiers, attributes, tags, and locations. A single match includes its stored details; multiple matches are returned as a list without guessing the intended item.
+
 Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg` and `000-011_cyberpunk-2077-no-coincidence_copyright-isbn-page.jpg`. Manifests retain original filenames and hashes, which remain stronger recovery signals than filenames. Primary/display image selection is managed through the HomeBox UI. Inventory never reorders or changes HomeBox primary attachments.
 
 Resync updates metadata without re-uploading existing attachments. The installed HomeBox integration has no verified attachment-metadata rename contract, so attachment display names are not renamed automatically; local canonical filenames remain authoritative.

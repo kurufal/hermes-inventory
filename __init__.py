@@ -385,6 +385,17 @@ def register(ctx):
 		result = update_item(params.get("target"), params.get("operation"), params.get("changes"), ctx.llm, settings=get_settings())
 		return json.dumps(result, indent=2)
 
+	search_schema = {"name": "inventory_search", "description": "Read-only search of canonical local Inventory records.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "category": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": False}}
+
+	def handle_inventory_search(params, **kwargs):
+		del kwargs
+		if not isinstance(params, dict):
+			return _json_error("Tool parameters must be an object")
+		from inventory.search import search_inventory
+		return json.dumps(search_inventory(**params, settings=get_settings()), indent=2)
+
+	ctx.register_tool(name="inventory_search", toolset="inventory", schema=search_schema, handler=handle_inventory_search, description="Read-only search for existing local Inventory items.", emoji="🔎")
+
 	ctx.register_tool(
 		name="inventory_update", toolset="inventory", schema=update_schema,
 		handler=handle_inventory_update, description="Update one existing Inventory item without bypassing durable Inventory evidence.", emoji="✏️",

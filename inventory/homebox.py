@@ -75,30 +75,20 @@ def list_tags():
 	return payload.get("items", []) if isinstance(payload, dict) else payload
 
 
-def create_tag(name):
-	response = requests.post(f"{_base_url()}/api/v1/tags", headers=json_headers(), json={"name": name}, timeout=HOMEBOX_TIMEOUT_SECONDS)
-	response.raise_for_status()
-	return response.json()
-
-
-def synchronized_tag_ids(current_tags, inventory_tags, managed_names=()):
-	"""Return HomeBox tag IDs for Inventory tags plus unrelated existing tags."""
+def synchronized_tag_ids(current_tags, inventory_tags, managed_names=(), category=""):
+	"""Match Inventory tags to existing HomeBox tags without creating any."""
 	available = list_tags()
 	by_name = {str(tag.get("name", "")).casefold(): tag for tag in available if isinstance(tag, dict) and tag.get("id")}
-	desired = [tag for tag in inventory_tags if isinstance(tag, dict) and tag.get("source") in {"system", "user"}]
-	# Inventory owns Type tags; unrelated HomeBox tags, including all non-Type tags, survive.
+	desired = [str(category).strip()] if category else []
+	desired.extend(str(tag.get("name", "")).strip() for tag in inventory_tags if isinstance(tag, dict) and tag.get("source") == "user")
 	managed_names = {str(name).casefold() for name in managed_names}
-	retained = [tag for tag in current_tags if isinstance(tag, dict) and tag.get("id") and not str(tag.get("name", "")).casefold().startswith("type:") and str(tag.get("name", "")).casefold() not in managed_names]
-	for tag in desired:
-		name = str(tag.get("name", "")).strip()
+	managed_names.update(name.casefold() for name in desired)
+	retained = [tag for tag in current_tags if isinstance(tag, dict) and tag.get("id") and str(tag.get("name", "")).casefold() not in managed_names]
+	for name in dict.fromkeys(desired):
 		if not name:
 			continue
 		entry = by_name.get(name.casefold())
-		if entry is None:
-			entry = create_tag(name)
-			if entry.get("id"):
-				by_name[name.casefold()] = entry
-		if entry.get("id"):
+		if entry is not None:
 			retained.append(entry)
 	return list(dict.fromkeys(str(tag["id"]) for tag in retained))
 
@@ -337,7 +327,7 @@ def update_entity(entity_id, record):
 				False,
 			)
 		),
-		"tagIds": synchronized_tag_ids(current.get("tags", []), record.get("tags", []), record.get("managed_tag_names", [])),
+		"tagIds": synchronized_tag_ids(current.get("tags", []), record.get("tags", []), record.get("managed_tag_names", []), record.get("category", "")),
 		"fields": build_homebox_fields(
 			record,
 			current.get(

@@ -3,6 +3,11 @@
 When the user asks to add, inventory, catalog, record, save, or put a
 photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 
+Use `inventory_search` for check my inventory, do I have, find, search, look
+up, what is item, show me, or what details requests. It is read-only: use it
+before updates when the target is unclear. Do not confuse search with
+`inventory_update`, which is only for edits, reanalysis, and resync.
+
 For an existing canonical item, use `inventory_update`; never bypass Inventory
 with raw HomeBox tools. Route update, change, correct, edit, rename, set,
 purchased at, paid, cost, located at, move, tag, and untag to `operation=edit`. Route

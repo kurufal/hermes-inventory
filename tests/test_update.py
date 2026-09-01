@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from inventory.homebox import synchronized_tag_ids
+from inventory.search import search_inventory
 from inventory.storage import format_asset_id, write_catalog
 from inventory.update import update_item
 
@@ -155,24 +156,42 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(manifest["identifiers"]["upc"], ["123"])
 
 	def test_homebox_tags_reuse_create_and_preserve_unrelated_tags(self):
-		current = [{"id": "signed", "name": "Signed"}, {"id": "old-type", "name": "Type: Collectible"}]
+		current = [{"id": "signed", "name": "Signed"}, {"id": "old-type", "name": "Collectible"}]
 		local = [{"name": "Type: Book", "source": "system"}, {"name": "Cyberpunk", "source": "user"}]
-		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "type: book"}, {"id": "cyberpunk", "name": "Cyberpunk"}]), patch("inventory.homebox.create_tag") as create:
-			self.assertEqual(synchronized_tag_ids(current, local), ["signed", "book", "cyberpunk"])
-		create.assert_not_called()
-		with patch("inventory.homebox.list_tags", return_value=[]), patch("inventory.homebox.create_tag", side_effect=[{"id": "book", "name": "Type: Book"}, {"id": "cyber", "name": "Cyberpunk"}]) as create:
-			self.assertEqual(synchronized_tag_ids(current, local), ["signed", "book", "cyber"])
-		self.assertEqual(create.call_count, 2)
+		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "bOoK"}, {"id": "cyberpunk", "name": "Cyberpunk"}]):
+			self.assertEqual(synchronized_tag_ids(current, local, ["Collectible", "Book", "Cyberpunk"], "Book"), ["signed", "book", "cyberpunk"])
+		with patch("inventory.homebox.list_tags", return_value=[]):
+			self.assertEqual(synchronized_tag_ids(current, local, ["Collectible", "Book", "Cyberpunk"], "Book"), ["signed"])
 
 	def test_homebox_tag_removal_and_repeat_are_idempotent(self):
-		current = [{"id": "signed", "name": "Signed"}, {"id": "cyber", "name": "Cyberpunk"}, {"id": "book", "name": "Type: Book"}]
+		current = [{"id": "signed", "name": "Signed"}, {"id": "cyber", "name": "Cyberpunk"}, {"id": "book", "name": "Book"}]
 		local = [{"name": "Type: Book", "source": "system"}]
-		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "Type: Book"}]):
-			self.assertEqual(synchronized_tag_ids(current, local, ["Type: Book", "Cyberpunk"]), ["signed", "book"])
-			self.assertEqual(synchronized_tag_ids(current, local, ["Type: Book", "Cyberpunk"]), ["signed", "book"])
+		with patch("inventory.homebox.list_tags", return_value=[{"id": "book", "name": "Book"}]):
+			self.assertEqual(synchronized_tag_ids(current, local, ["Book", "Cyberpunk"], "Book"), ["signed", "book"])
+			self.assertEqual(synchronized_tag_ids(current, local, ["Book", "Cyberpunk"], "Book"), ["signed", "book"])
 
 	def test_catalog_uses_neutral_preview_field(self):
 		write_catalog(self.settings)
 		catalog = json.loads((self.root / "catalog.json").read_text(encoding="utf-8"))
 		self.assertIn("preview_image_relative_path", catalog["items"][0])
 		self.assertNotIn("primary_image_relative_path", catalog["items"][0])
+
+	def test_searches_local_inventory_without_writing(self):
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8")); manifest["tags"] = [{"name": "Cyberpunk", "source": "user"}]
+		(self.item / "item.json").write_text(json.dumps(manifest), encoding="utf-8")
+		payload = (self.item / "item.json").read_text(encoding="utf-8")
+		for query in ("000-011", self.item_id, "Cyberpunk 2077: No Coincidence", "Cyberpunk", "9780000000001"):
+			self.assertEqual(search_inventory(query, settings=self.settings)["count"], 1)
+		self.assertEqual(search_inventory(category="Book", settings=self.settings)["count"], 1)
+		self.assertEqual(search_inventory(tags=["Cyberpunk"], settings=self.settings)["count"], 1)
+		self.assertEqual(search_inventory(tags=["missing"], settings=self.settings)["status"], "not_found")
+		self.assertEqual(search_inventory("nothing", settings=self.settings)["status"], "not_found")
+		self.assertEqual((self.item / "item.json").read_text(encoding="utf-8"), payload)
+
+	def test_search_returns_multiple_matches_without_selecting_one(self):
+		other = self.settings.items_dir / "INV-other"; other.mkdir(parents=True)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8")); manifest["inventory_id"] = "INV-other"; manifest["asset_id"] = "000-012"; manifest["item"]["name"] = "Cyberpunk Figure"
+		(other / "item.json").write_text(json.dumps(manifest), encoding="utf-8")
+		result = search_inventory("Cyberpunk", settings=self.settings)
+		self.assertEqual(result["count"], 2)
+		self.assertEqual([item["asset_id"] for item in result["items"]], ["000-011", "000-012"])

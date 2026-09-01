@@ -55,7 +55,7 @@ def _record(manifest, image_directory):
 		"attributes": manifest.get("attributes", []), "source_directory": str(image_directory),
 		"purchase_price": manifest.get("purchase_price"), "purchase_from": manifest.get("purchase_from", ""),
 		"purchase_date": manifest.get("purchase_date", ""), "notes": manifest.get("notes", ""),
-		"tags": manifest.get("tags", []),
+		"tags": manifest.get("tags", []), "category": item.get("category", ""),
 		"managed_tag_names": manifest.get("homebox", {}).get("managed_tag_names", []),
 		"source_images": [Path(image.get("relative_path", "")).name for image in manifest.get("images", [])],
 		"image_hashes": [{"filename": Path(image.get("relative_path", "")).name, "sha256": image.get("sha256", "")} for image in manifest.get("images", [])],
@@ -125,7 +125,7 @@ def _reconcile_managed_type_tag(manifest):
 	user_tags = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
 	manifest["tags"] = [managed, *user_tags]
 	homebox = manifest.setdefault("homebox", {})
-	current_names = [str(tag.get("name", "")) for tag in manifest["tags"] if isinstance(tag, dict) and tag.get("source") in {"system", "user"}]
+	current_names = [str(manifest.get("item", {}).get("category", "")), *[str(tag.get("name", "")) for tag in manifest["tags"] if isinstance(tag, dict) and tag.get("source") == "user"]]
 	homebox["managed_tag_names"] = list(dict.fromkeys([*homebox.get("managed_tag_names", []), *current_names]))
 
 
