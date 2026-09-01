@@ -2,9 +2,11 @@
 
 import os
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from inventory.config import get_settings, storage_health, write_storage_config
@@ -77,3 +79,38 @@ class InventorySettingsTests(unittest.TestCase):
 			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
 				with self.assertRaisesRegex(ValueError, "toon.enabled must be a boolean"):
 					get_settings()
+
+	def test_secret_fallback_preserves_unrelated_dotenv_values(self):
+		from inventory.config import homebox_api_key, write_homebox_api_key
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / ".env").write_text("UNRELATED=value\nHOMEBOX_API_KEY=old\n", encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=True):
+				write_homebox_api_key("new")
+			contents = (home / ".env").read_text(encoding="utf-8")
+		self.assertIn("UNRELATED=value", contents)
+		self.assertIn("HOMEBOX_API_KEY=new", contents)
+
+	def test_existing_fallback_dotenv_secret_is_detected(self):
+		from inventory.config import homebox_api_key
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / ".env").write_text("HOMEBOX_API_KEY=configured-secret\n", encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=True):
+				self.assertEqual(homebox_api_key(), "configured-secret")
+
+	def test_homebox_environment_url_overrides_plugin_json_for_docker(self):
+		from inventory.config import homebox_url
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			(home / "inventory-config.json").write_text('{"homebox":{"url":"http://desktop-host"}}', encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home), "HOMEBOX_URL": "http://docker-host"}, clear=True):
+				self.assertEqual(homebox_url(), "http://docker-host")
+
+	def test_homebox_secret_uses_hermes_environment_helper_when_available(self):
+		from inventory.config import write_homebox_api_key
+		calls = []
+		helper = SimpleNamespace(set_environment_value=lambda name, value: calls.append((name, value)))
+		with patch.dict(sys.modules, {"hermes_constants": helper}):
+			write_homebox_api_key("secret", SimpleNamespace())
+		self.assertEqual(calls, [("HOMEBOX_API_KEY", "secret")])

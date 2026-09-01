@@ -4,21 +4,19 @@ from pathlib import Path
 
 import requests
 
-from inventory.config import HOMEBOX_ATTACHMENT_TIMEOUT_SECONDS, HOMEBOX_TIMEOUT_SECONDS
+from inventory.config import HOMEBOX_ATTACHMENT_TIMEOUT_SECONDS, HOMEBOX_TIMEOUT_SECONDS, homebox_api_key, homebox_url
 from inventory.fields import build_homebox_fields
 
 
 def _base_url():
-	import os
-	url = os.environ.get("HOMEBOX_URL", "").strip().rstrip("/")
+	url = homebox_url()
 	if not url:
 		raise RuntimeError("HOMEBOX_URL is not set")
 	return url
 
 
 def auth_headers():
-	import os
-	api_key = os.environ.get("HOMEBOX_API_KEY", "")
+	api_key = homebox_api_key()
 	if not api_key:
 		raise RuntimeError(
 			"HOMEBOX_API_KEY is not set"

@@ -23,7 +23,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
 	sys.path.insert(0, _PLUGIN_DIR)
 
-from inventory.config import get_settings, storage_health, write_storage_config
+from inventory.config import get_settings, homebox_api_key, homebox_url
 from inventory.media import is_supported_image
 from inventory.uploads import (
 	PendingUploadError,
@@ -151,6 +151,11 @@ def inventory_ingest(
 	"""Ingest one physical item represented by attached photographs."""
 
 	settings = get_settings()
+	if not homebox_url(settings) or not homebox_api_key():
+		return _json_error(
+			"HomeBox is not configured. Run /inventory setup.",
+			status="not_configured",
+		)
 	pending_batch = None
 	using_pending_upload = not image_paths and use_pending_upload is True
 	if using_pending_upload:
@@ -354,10 +359,6 @@ def register(ctx):
 		toolset="inventory",
 		schema=schema,
 		handler=handle_inventory_ingest,
-		requires_env=[
-			"HOMEBOX_URL",
-			"HOMEBOX_API_KEY",
-		],
 		description=(
 			"MANDATORY tool for adding photographed physical items to HomeBox "
 			"inventory. Call me first. I gather the details myself. Call immediately "
@@ -377,3 +378,7 @@ def register(ctx):
 	register_command = getattr(ctx, "register_command", None)
 	if callable(register_command):
 		register_command(name="inventory", handler=inventory_command, description="Inventory setup, storage, backup, and recovery commands.")
+	register_cli_command = getattr(ctx, "register_cli_command", None)
+	if callable(register_cli_command):
+		from inventory.commands import inventory_cli
+		register_cli_command(name="inventory", handler=inventory_cli, description="Configure Hermes Inventory secrets locally.")

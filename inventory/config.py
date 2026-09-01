@@ -74,6 +74,18 @@ def _load_config_document(hermes_home: Path) -> tuple[dict[str, Any], Path]:
 	return _read_legacy_yaml(hermes_home / "inventory-config.yaml"), json_path
 
 
+def environment_value(name: str) -> str:
+	"""Read a Hermes-managed environment value without import-time caching."""
+	try:
+		from hermes_constants import get_environment_value
+		value = get_environment_value(name)
+		if value is not None:
+			return str(value)
+	except (ImportError, AttributeError, TypeError):
+		pass
+	return os.environ.get(name, "")
+
+
 def _boolean(value: Any, name: str, default: bool = False) -> bool:
 	if value is None or value == "":
 		return default
@@ -166,15 +178,29 @@ def get_settings() -> InventorySettings:
 	)
 
 
-def write_storage_config(persistent_data_dir: Path | None) -> None:
-	"""Atomically merge the non-secret persistent-storage override."""
-	settings = get_settings()
+def homebox_url(settings: InventorySettings | None = None) -> str:
+	"""Resolve the non-secret HomeBox URL: environment then plugin config."""
+	settings = settings or get_settings()
+	return environment_value("HOMEBOX_URL").strip().rstrip("/") or str(
+		_nested_value(_load_config_document(settings.hermes_home)[0], "homebox", "url", "")
+	).strip().rstrip("/")
+
+
+def homebox_api_key() -> str:
+	value = environment_value("HOMEBOX_API_KEY")
+	if value:
+		return value
+	try:
+		for line in (resolve_hermes_home() / ".env").read_text(encoding="utf-8").splitlines():
+			if line.startswith("HOMEBOX_API_KEY="):
+				return line.partition("=")[2]
+	except OSError:
+		pass
+	return ""
+
+
+def _write_config_document(settings: InventorySettings, payload: dict[str, Any]) -> None:
 	settings.config_path.parent.mkdir(parents=True, exist_ok=True)
-	payload, _ = _load_config_document(settings.hermes_home)
-	storage = payload.setdefault("storage", {})
-	if not isinstance(storage, dict):
-		raise ConfigurationError("storage must be an object in inventory-config.json")
-	storage["persistent_data_dir"] = "" if persistent_data_dir is None else str(_configured_path(str(persistent_data_dir), "storage.persistent_data_dir"))
 	fd, temporary_name = tempfile.mkstemp(prefix=".inventory-config-", suffix=".tmp", dir=settings.config_path.parent)
 	try:
 		with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -189,6 +215,78 @@ def write_storage_config(persistent_data_dir: Path | None) -> None:
 		except OSError:
 			pass
 		raise
+
+
+def write_storage_config(persistent_data_dir: Path | None) -> None:
+	"""Atomically merge the non-secret persistent-storage override."""
+	settings = get_settings()
+	payload, _ = _load_config_document(settings.hermes_home)
+	storage = payload.setdefault("storage", {})
+	if not isinstance(storage, dict):
+		raise ConfigurationError("storage must be an object in inventory-config.json")
+	storage["persistent_data_dir"] = "" if persistent_data_dir is None else str(_configured_path(str(persistent_data_dir), "storage.persistent_data_dir"))
+	_write_config_document(settings, payload)
+
+
+def write_homebox_url(url: str) -> None:
+	"""Atomically save the normal, non-secret HomeBox URL unchanged."""
+	if not isinstance(url, str) or not url.strip():
+		raise ConfigurationError("HomeBox URL must not be empty")
+	settings = get_settings()
+	payload, _ = _load_config_document(settings.hermes_home)
+	homebox = payload.setdefault("homebox", {})
+	if not isinstance(homebox, dict):
+		raise ConfigurationError("homebox must be an object in inventory-config.json")
+	homebox["url"] = url
+	_write_config_document(settings, payload)
+
+
+def _dotenv_path(settings: InventorySettings) -> Path:
+	return settings.hermes_home / ".env"
+
+
+def _write_dotenv_secret(name: str, value: str, settings: InventorySettings) -> None:
+	"""Compatibility writer for Hermes' normal environment file."""
+	path = _dotenv_path(settings)
+	lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+	prefix = f"{name}="
+	updated = False
+	output = []
+	for line in lines:
+		if line.startswith(prefix):
+			output.append(prefix + value)
+			updated = True
+		else:
+			output.append(line)
+	if not updated:
+		output.append(prefix + value)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	fd, temporary_name = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=path.parent)
+	try:
+		with os.fdopen(fd, "w", encoding="utf-8") as handle:
+			handle.write("\n".join(output) + "\n")
+			handle.flush()
+			os.fsync(handle.fileno())
+		os.replace(temporary_name, path)
+	except Exception:
+		try:
+			os.unlink(temporary_name)
+		except OSError:
+			pass
+		raise
+
+
+def write_homebox_api_key(value: str, settings: InventorySettings | None = None) -> None:
+	if not value:
+		return
+	settings = settings or get_settings()
+	try:
+		from hermes_constants import set_environment_value
+		set_environment_value("HOMEBOX_API_KEY", value)
+		return
+	except (ImportError, AttributeError, TypeError):
+		_write_dotenv_secret("HOMEBOX_API_KEY", value, settings)
+		os.environ["HOMEBOX_API_KEY"] = value
 
 
 def storage_health(path: Path) -> tuple[bool, str]:

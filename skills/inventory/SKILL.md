@@ -3,6 +3,10 @@
 When the user asks to add, inventory, catalog, record, save, or put a
 photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 
+When `inventory_ingest` returns `not_configured`, direct the user to
+`/inventory setup`. Do not request or accept a HomeBox API key in chat.
+`/inventory setup secrets` provides the local secure terminal workflow.
+
 Treat these as direct inventory commands:
 
 - “add this to my inventory”

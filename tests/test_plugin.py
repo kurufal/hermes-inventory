@@ -69,6 +69,10 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			return backend_result or {"status": "created", "created": True, "durable": True}
 
 		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
+			self.plugin, "homebox_url", return_value="http://homebox",
+		), patch.object(
+			self.plugin, "homebox_api_key", return_value="configured-key",
+		), patch.object(
 			self.plugin,
 			"_load_inventory_ingest",
 			return_value=fake_ingest,
@@ -111,6 +115,19 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		result, _, _ = self.run_ingest([])
 
 		self.assertIn("image_paths or set use_pending_upload", result)
+
+	def test_ingest_before_homebox_configuration_returns_not_configured(self):
+		settings = SimpleNamespace(hermes_images_dir=self.root / "images")
+		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
+			self.plugin, "homebox_url", return_value="",
+		), patch.object(
+			self.plugin, "homebox_api_key", return_value="",
+		), patch.object(
+			self.plugin, "_load_inventory_ingest", side_effect=AssertionError("must not stage or ingest"),
+		):
+			result = self.plugin.inventory_ingest([str(self.explicit)], "fake-llm")
+		self.assertIn('"status": "not_configured"', result)
+		self.assertIn("/inventory setup", result)
 
 	def test_pending_batch_is_consumed_after_staging(self):
 		with patch.object(
@@ -198,6 +215,10 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 
 		settings = SimpleNamespace(hermes_images_dir=self.root / "images", runtime_dir=self.root / "runtime")
 		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
+			self.plugin, "homebox_url", return_value="http://homebox",
+		), patch.object(
+			self.plugin, "homebox_api_key", return_value="configured-key",
+		), patch.object(
 			self.plugin,
 			"_load_inventory_ingest",
 			return_value=failing_ingest,
@@ -236,6 +257,33 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("image_paths", properties)
 		self.assertNotIn("minItems", properties["image_paths"])
 		self.assertNotIn("recent_dashboard_upload", properties)
+
+	def test_registers_commands_without_homebox_credentials(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_tool(self, **kwargs):
+				registrations["tool"] = kwargs
+
+			def register_command(self, **kwargs):
+				registrations["command"] = kwargs
+
+			def register_cli_command(self, **kwargs):
+				registrations["cli"] = kwargs
+
+		with patch.object(self.plugin, "start_pending_upload_watcher"):
+			self.plugin.register(FakeContext())
+		self.assertEqual(registrations["command"]["name"], "inventory")
+		self.assertEqual(registrations["cli"]["name"], "inventory")
+		self.assertNotIn("requires_env", registrations["tool"])
 
 	def test_tool_description_contains_natural_language_routing_triggers(self):
 		registrations = {}
