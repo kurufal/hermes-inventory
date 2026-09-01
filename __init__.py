@@ -6,6 +6,7 @@ local inventory package bundled with this plugin.
 """
 
 import json
+import os
 import shutil
 import sys
 import uuid
@@ -22,7 +23,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
 	sys.path.insert(0, _PLUGIN_DIR)
 
-from inventory.config import HERMES_HOME, INVENTORY_BASE_DIR
+from inventory.config import HERMES_HOME, STAGING_DIR, get_settings, storage_health, write_storage_config
 from inventory.uploads import (
 	PendingUploadError,
 	mark_pending_upload_consumed,
@@ -32,8 +33,7 @@ from inventory.uploads import (
 )
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
-STAGING_ROOT = INVENTORY_BASE_DIR / "tool-staging"
-
+STAGING_ROOT = STAGING_DIR
 SUPPORTED_IMAGES = {
 	".png",
 	".jpg",
@@ -45,15 +45,8 @@ SUPPORTED_IMAGES = {
 
 # These are plugin defaults, not hard overrides. Hermes operator configuration
 # under auxiliary.hermes_inventory_vision takes precedence when present. The
-# defaults match the local Qwen3-VL deployment used by this installation while
-# still allowing the host to select another provider, model, or endpoint.
-VISION_TASK_DEFAULTS = {
-	"provider": "custom",
-	"model": "qwen3-vl:8b-instruct-q8_0",
-	"base_url": "http://192.168.1.160:30068/v1",
-	"api_key": "ollama",
-	"timeout": 600,
-}
+# Hermes operator configuration selects provider, model, endpoint, and secrets.
+VISION_TASK_DEFAULTS = {"timeout": 600}
 
 
 def _json_error(message: str, **extra) -> str:
@@ -99,11 +92,11 @@ def _normalize_image_paths(raw_paths):
 				f"Unsupported image type: {path.name}"
 			)
 
-		# Dashboard-pasted images live below HERMES_HOME/images.
+		# Hermes-managed attachments live below HERMES_HOME/images.
 		# Keeping this restriction prevents arbitrary host-file ingestion
 		# through model-generated paths.
 		try:
-			path.relative_to(HERMES_HOME)
+			path.relative_to((HERMES_HOME / "images").resolve())
 		except ValueError:
 			raise ValueError(
 				f"Image path is outside HERMES_HOME and was refused: {path}"
@@ -132,9 +125,10 @@ def _load_inventory_ingest():
 
 
 def _stage_images(image_paths):
-	STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+	staging_root = STAGING_ROOT
+	staging_root.mkdir(parents=True, exist_ok=True)
 
-	stage_dir = STAGING_ROOT / f"ingest-{uuid.uuid4().hex}"
+	stage_dir = staging_root / f"ingest-{uuid.uuid4().hex}"
 	stage_dir.mkdir(parents=True, exist_ok=False)
 
 	for index, source in enumerate(image_paths, start=1):
@@ -146,6 +140,63 @@ def _stage_images(image_paths):
 		shutil.copy2(source, destination)
 
 	return stage_dir
+
+
+def inventory_command(raw_args="", **kwargs):
+	"""Handle the single non-secret /inventory command namespace."""
+	del kwargs
+	parts = str(raw_args or "").strip().split(maxsplit=1)
+	command = parts[0].casefold() if parts else "help"
+	arguments = parts[1] if len(parts) > 1 else ""
+	settings = get_settings()
+	if command in {"help", ""}:
+		return "Commands: /inventory setup, status, doctor, homebox, storage, uploads, backup, recover, version, help"
+	if command == "version":
+		return "hermes-inventory 0.2.0"
+	if command in {"status", "setup", "doctor"}:
+		ok, reason = storage_health(settings.persistent_data_dir)
+		return "\n".join([f"Hermes home: {settings.hermes_home}", f"Hermes uploads: {settings.hermes_images_dir}", f"Inventory runtime: {settings.runtime_dir} ({settings.runtime_source})", f"Inventory persistent data: {settings.persistent_data_dir} ({settings.persistent_source})", f"Inventory backups: {settings.backup_dir} ({settings.backup_source})", f"Persistent storage: {'PASS' if ok else 'FAIL'} {reason}", f"HomeBox URL: {'configured' if os.environ.get('HOMEBOX_URL') else 'missing'}", f"HomeBox API key: {'configured' if os.environ.get('HOMEBOX_API_KEY') else 'missing'}", f"TOON: {'enabled (adapter unavailable)' if settings.toon_enabled else 'disabled'}"])
+	if command == "storage":
+		operation, _, path = arguments.partition(" ")
+		operation = operation.casefold() or "show"
+		if operation in {"show", "test"}:
+			ok, reason = storage_health(settings.persistent_data_dir)
+			return f"Persistent data: {settings.persistent_data_dir}\nRuntime: {settings.runtime_dir}\nBackups: {settings.backup_dir}\nStorage health: {'PASS' if ok else 'FAIL'} {reason}"
+		if operation == "set" and path:
+			if os.environ.get("INVENTORY_BASE_DIR", "").strip():
+				return "INVENTORY_BASE_DIR environment variable has higher priority and cannot be overridden by plugin config."
+			candidate = Path(path)
+			ok, reason = storage_health(candidate)
+			if not ok:
+				return f"Storage not changed; destination is unavailable: {reason}"
+			write_storage_config(candidate)
+			return f"Storage configured: {candidate}\nPrevious location was not moved."
+		if operation == "reset":
+			write_storage_config(None)
+			return "Storage config reset to the Hermes-home default unless INVENTORY_BASE_DIR is set."
+		return "Usage: /inventory storage [show|test|set <path>|reset]"
+	if command == "uploads":
+		return f"Watched Hermes image directory: {settings.hermes_images_dir}\nPrefixes: dashboard_, upload_, clip_\nRuntime state: {settings.pending_upload_state_path}"
+	if command == "backup":
+		from inventory.backup import create_backup, list_backups, verify_backup
+		operation, _, value = arguments.partition(" ")
+		operation = operation.casefold() or "create"
+		if operation in {"create", ""}:
+			return json.dumps(create_backup(), indent=2)
+		if operation == "list":
+			return "\n".join(str(path) for path in list_backups()) or "No inventory backups found."
+		if operation == "verify":
+			path = Path(value) if value else (list_backups()[0] if list_backups() else None)
+			return json.dumps(verify_backup(path), indent=2) if path else "No inventory backups found."
+		return "Usage: /inventory backup [create|list|verify [path]]"
+	if command == "recover":
+		from inventory.recovery import scan
+		if not arguments or arguments.casefold() in {"status", "scan", "plan"}:
+			return json.dumps(scan(), indent=2)
+		return "Usage: /inventory recover [status|scan|plan]. Automatic apply is not supported."
+	if command == "homebox":
+		return "HomeBox URL and API key are configured through Hermes environment/secrets. Native export/import is unavailable because no verified public API was found in this environment."
+	return f"Unknown Inventory command: {parts[0]}\n\nUse /inventory help to see available commands."
 
 
 def inventory_ingest(
@@ -366,3 +417,6 @@ def register(ctx):
 		"inventory plugin register_tool result=%r",
 		registration,
 	)
+	register_command = getattr(ctx, "register_command", None)
+	if callable(register_command):
+		register_command(name="inventory", handler=inventory_command, description="Inventory setup, storage, backup, and recovery commands.")

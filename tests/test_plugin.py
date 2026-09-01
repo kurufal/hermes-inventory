@@ -31,9 +31,10 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 	def setUp(self):
 		self.temporary_directory = tempfile.TemporaryDirectory()
 		self.root = Path(self.temporary_directory.name)
-		self.explicit = self.root / "explicit.png"
+		(self.root / "images").mkdir()
+		self.explicit = self.root / "images" / "explicit.png"
 		self.explicit.write_bytes(b"explicit")
-		self.pending = self.root / "dashboard_20260816_084100_item.png"
+		self.pending = self.root / "images" / "dashboard_20260816_084100_item.png"
 		self.pending.write_bytes(b"pending")
 		self.batch = PendingUploadBatch(
 			batch_id="batch-1",

@@ -1,6 +1,12 @@
 name: hermes-inventory
-version: "0.1.65"
+version: "0.2.0"
 description: "Add photographed physical items to a HomeBox inventory."
 manifest_version: 1
 provides_tools: [inventory_ingest]
-requires_env: [HOMEBOX_URL, HOMEBOX_API_KEY]
+requires_env:
+	- name: HOMEBOX_URL
+		description: "Base URL of the HomeBox server."
+		secret: false
+	- name: HOMEBOX_API_KEY
+		description: "API key used to authenticate with HomeBox."
+		secret: true

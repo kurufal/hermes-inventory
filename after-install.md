@@ -1,26 +1,9 @@
 # hermes-inventory installed
 
-1. Install the required Python dependency in the same environment that runs Hermes:
+1. Install [requirements.txt](requirements.txt) in Hermes' Python environment.
+2. Set `HOMEBOX_URL` and the secret `HOMEBOX_API_KEY` through Hermes configuration.
+3. Run `/inventory setup`, then `/inventory doctor`.
+4. Optionally set persistent storage with `/inventory storage set <path>` after the target share is mounted and accessible to Hermes.
+5. Run `/inventory backup create` and `/inventory backup verify` after the first successful ingest.
 
-   `python -m pip install "requests>=2.31,<3"`
-
-2. Configure `HOMEBOX_URL` and `HOMEBOX_API_KEY` in the Hermes runtime environment.
-
-3. The plugin includes the tested **Inventory vision** route for
-   `qwen3-vl:8b-instruct-q8_0` at `http://192.168.1.160:30068/v1` with the
-   `ollama` key. If this deployment uses a different endpoint or model, run
-   `hermes model` and override `auxiliary.hermes_inventory_vision.base_url`,
-   `.api_key`, `.model`, and `.timeout` in Hermes' `config.yaml`. Hermes
-   operator configuration takes precedence over the plugin defaults.
-
-4. Validate the installed plugin with `hermes plugins doctor <plugin-path> --ci`.
-
-5. The plugin watches `$HERMES_HOME/images` for complete `dashboard_` image
-   files and stores pending batches in
-   `$INVENTORY_BASE_DIR/pending-uploads.json`. Optional settings are
-   `INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS` (default `1`),
-   `INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS` (default `10`),
-   `INVENTORY_PENDING_UPLOAD_TTL_SECONDS` (default `300`), and
-   `INVENTORY_UPLOAD_STATE_RETENTION_SECONDS` (default `86400`).
-
-See README.md for storage paths, duplicate behavior, and the required HomeBox API endpoints.
+The plugin defaults to `$HERMES_HOME/inventory-runtime` for local operational state and `$HERMES_HOME/inventory` for durable inventory evidence. See [README.md](README.md) for Desktop, Docker, UNC/NAS, recovery, and security guidance.

@@ -8,12 +8,14 @@ from pathlib import Path
 
 from inventory.config import (
 	METADATA_DIR,
-	ORIGINALS_DIR,
 	RECEIPTS_DIR,
+	get_settings,
+	storage_health,
 )
 from inventory.duplicates import check_homebox_duplicates
 from inventory.homebox import create_entity, complete_entity
 from inventory.normalize import normalize_record
+from inventory.storage import build_manifest, write_catalog, write_manifest
 from inventory.vision import analyze_directory
 
 
@@ -94,10 +96,7 @@ def prepare_originals(
 			"No supported images found"
 		)
 
-	destination = (
-		ORIGINALS_DIR
-		/ item_id
-	)
+	destination = get_settings().items_dir / item_id / "images"
 
 	destination.mkdir(
 		parents=True,
@@ -196,10 +195,13 @@ def ingest(
 	source_directory,
 	vision_client,
 ):
-	ORIGINALS_DIR.mkdir(
-		parents=True,
-		exist_ok=True,
-	)
+	settings = get_settings()
+	available, reason = storage_health(settings.persistent_data_dir)
+	if not available:
+		raise RuntimeError(
+			"Persistent inventory storage is unavailable; HomeBox was not changed: "
+			+ reason
+		)
 
 	METADATA_DIR.mkdir(
 		parents=True,
@@ -225,6 +227,16 @@ def ingest(
 	record = normalize_record(
 		raw
 	)
+	manifest = build_manifest(
+		item_id,
+		record,
+		raw,
+		original_directory,
+		status="pending_homebox_sync",
+	)
+	item_root = original_directory.parent
+	shutil.copy2(metadata_path, item_root / "vision.json")
+	manifest_path = write_manifest(manifest)
 
 	duplicate_result = (
 		check_homebox_duplicates(
@@ -238,6 +250,9 @@ def ingest(
 		]
 		!= "NEW_ITEM"
 	):
+		manifest = build_manifest(item_id, record, raw, original_directory, status="duplicate")
+		write_manifest(manifest)
+		write_catalog()
 		result = {
 			"status": (
 				"duplicate_candidate"
@@ -291,6 +306,13 @@ def ingest(
 		)
 
 	except Exception as exc:
+		write_manifest(build_manifest(
+			item_id, record, raw, original_directory,
+			status="pending_homebox_sync",
+			homebox={"entity_id": entity_id, "asset_id": None, "collection_id": None, "entity_type": None, "last_synced_at": None},
+			error=str(exc),
+		))
+		write_catalog()
 		result = {
 			"status": (
 				"homebox_partial_failure"
@@ -373,6 +395,11 @@ def ingest(
 			)
 		),
 	}
+	write_manifest(build_manifest(
+		item_id, record, raw, original_directory, status="synced",
+		homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": None, "entity_type": None, "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
+	))
+	write_catalog()
 
 	receipt = save_receipt(
 		item_id,

@@ -1,4 +1,4 @@
-"""Plugin-owned pending state for Hermes dashboard image uploads."""
+"""Plugin-owned pending state for Hermes-managed image uploads."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from inventory.config import (
-	DASHBOARD_IMAGES_DIR,
+	HERMES_IMAGES_DIR,
 	PENDING_UPLOAD_STATE_PATH,
 	PENDING_UPLOAD_TTL_SECONDS,
 	UPLOAD_BATCH_WINDOW_SECONDS,
@@ -30,6 +30,7 @@ _DASHBOARD_NAME_RE = re.compile(
 	r"^dashboard_(?P<date>\d{8})_(?P<time>\d{6})(?:_|\.|$)"
 )
 _SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_HERMES_UPLOAD_PREFIXES = ("dashboard_", "upload_", "clip_")
 _STATE_VERSION = 1
 _STABILITY_DELAY_SECONDS = 0.05
 
@@ -224,13 +225,17 @@ def _expire_and_prune_locked(
 	return changed
 
 
-def _supported_dashboard_file(path: Path) -> bool:
+def _supported_hermes_upload(path: Path) -> bool:
 	return (
-		path.name.startswith("dashboard_")
+		path.name.startswith(_HERMES_UPLOAD_PREFIXES)
 		and path.suffix.lower() in _SUPPORTED_IMAGES
 		and not path.is_symlink()
 		and path.is_file()
 	)
+
+
+# Compatibility for integrations that imported the former internal helper.
+_supported_dashboard_file = _supported_hermes_upload
 
 
 def _detection_sort_key(path: Path) -> tuple[float, str]:
@@ -300,10 +305,10 @@ def _batch_last_event_timestamp(batch: dict[str, Any]) -> float:
 	return best
 
 
-def observe_dashboard_uploads(
+def observe_hermes_uploads(
 	*,
 	now: float | None = None,
-	images_dir: Path = DASHBOARD_IMAGES_DIR,
+	images_dir: Path = HERMES_IMAGES_DIR,
 	state_path: Path = PENDING_UPLOAD_STATE_PATH,
 	batch_window_seconds: float = UPLOAD_BATCH_WINDOW_SECONDS,
 	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
@@ -311,7 +316,7 @@ def observe_dashboard_uploads(
 	stability_delay_seconds: float = _STABILITY_DELAY_SECONDS,
 	logger: logging.Logger = _LOGGER,
 ) -> int:
-	"""Record complete new, RECENT dashboard images and return the count recorded.
+	"""Record complete new, recent Hermes images and return the count recorded.
 
 	A file is only ever recorded as a new pending upload when its own event
 	timestamp (filename timestamp, else mtime) is within
@@ -354,7 +359,7 @@ def observe_dashboard_uploads(
 			(
 				path.resolve()
 				for path in entries
-				if _supported_dashboard_file(path)
+				if _supported_hermes_upload(path)
 				and str(path.resolve()) not in recorded_paths
 			),
 			key=_detection_sort_key,
@@ -366,7 +371,7 @@ def observe_dashboard_uploads(
 
 			event_timestamp = _event_timestamp(path)
 			age = current - event_timestamp
-			if not (0 <= age <= ttl_seconds):
+			if not (-5 <= age <= ttl_seconds):
 				# Too old (or clock-skewed into the future) to be a genuine
 				# new upload. Never resurrect stale files as pending; leave
 				# them unrecorded so a legitimate recent upload elsewhere in
@@ -430,7 +435,7 @@ def observe_dashboard_uploads(
 
 def _batch_to_result(
 	batch: dict[str, Any],
-	images_dir: Path = DASHBOARD_IMAGES_DIR,
+	images_dir: Path = HERMES_IMAGES_DIR,
 ) -> PendingUploadBatch:
 	images = batch.get("images", [])
 	images_root = images_dir.resolve()
@@ -445,7 +450,7 @@ def _batch_to_result(
 			or not path.is_file()
 			or path.parent != images_root
 			or path.suffix.lower() not in _SUPPORTED_IMAGES
-			or not path.name.startswith("dashboard_")
+			or not _supported_hermes_upload(path)
 		):
 			raise PendingUploadError(
 				f"Pending dashboard image is missing or invalid: {path}"
@@ -465,18 +470,18 @@ def _batch_to_result(
 	)
 
 
-def _count_dashboard_candidates(images_dir: Path) -> int:
+def _count_hermes_upload_candidates(images_dir: Path) -> int:
 	try:
 		entries = images_dir.resolve(strict=True).iterdir()
 	except OSError:
 		return 0
-	return sum(1 for path in entries if _supported_dashboard_file(path))
+	return sum(1 for path in entries if _supported_hermes_upload(path))
 
 
 def resolve_pending_upload_batch(
 	*,
 	now: float | None = None,
-	images_dir: Path = DASHBOARD_IMAGES_DIR,
+	images_dir: Path = HERMES_IMAGES_DIR,
 	state_path: Path = PENDING_UPLOAD_STATE_PATH,
 	ttl_seconds: float = PENDING_UPLOAD_TTL_SECONDS,
 	retention_seconds: float = UPLOAD_STATE_RETENTION_SECONDS,
@@ -550,7 +555,7 @@ def resolve_pending_upload_batch(
 			break
 		attempted_reconciliation = True
 		try:
-			observe_dashboard_uploads(
+			observe_hermes_uploads(
 				now=current,
 				images_dir=images_dir,
 				state_path=state_path,
@@ -569,7 +574,7 @@ def resolve_pending_upload_batch(
 		"state_file": str(state_path),
 		"pending_batch_count": pending_batch_count,
 		"total_batch_count": total_batch_count,
-		"candidate_count": _count_dashboard_candidates(images_dir),
+		"candidate_count": _count_hermes_upload_candidates(images_dir),
 	}
 	raise error
 
@@ -645,6 +650,10 @@ def stop_pending_upload_watcher() -> None:
 	"""Signal the daemon watcher to stop; intended for tests and process teardown."""
 
 	_WATCHER_STOP.set()
+
+
+# Public compatibility alias retained for existing plugin consumers.
+observe_dashboard_uploads = observe_hermes_uploads
 # End of module.
 
 
