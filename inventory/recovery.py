@@ -24,8 +24,8 @@ def _safe_item_path(item_root: Path, relative_path: str) -> Path | None:
 
 def scan() -> dict:
 	settings = get_settings()
-	report = {"valid_items": [], "corrupt_manifests": [], "unsupported_schema_versions": [], "incomplete_transactions": [], "missing_images": [], "unsafe_image_paths": [], "checksum_mismatches": [], "pending_homebox_sync": [], "homebox_linked_items": [], "duplicate_inventory_ids": [], "duplicate_observations": [], "catalog_inconsistencies": []}
-	ids = []
+	report = {"valid_items": [], "corrupt_manifests": [], "unsupported_schema_versions": [], "incomplete_transactions": [], "missing_images": [], "unsafe_image_paths": [], "checksum_mismatches": [], "pending_homebox_sync": [], "homebox_linked_items": [], "duplicate_inventory_ids": [], "duplicate_asset_ids": [], "duplicate_observations": [], "catalog_inconsistencies": []}
+	ids, asset_ids = [], []
 	if settings.items_dir.exists():
 		report["incomplete_transactions"] = [str(path) for path in settings.items_dir.glob(".tmp-*") if path.is_dir()]
 	for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
@@ -39,6 +39,7 @@ def scan() -> dict:
 			continue
 		item_id = str(manifest.get("inventory_id", ""))
 		ids.append(item_id)
+		asset_ids.append(str(manifest.get("asset_id", "")))
 		report["valid_items"].append(item_id)
 		if manifest.get("status") == "pending_homebox_sync":
 			report["pending_homebox_sync"].append(item_id)
@@ -54,6 +55,7 @@ def scan() -> dict:
 			elif image.get("sha256") and sha256_file(image_path) != image["sha256"]:
 				report["checksum_mismatches"].append(str(image_path))
 	report["duplicate_inventory_ids"] = [value for value, count in Counter(ids).items() if value and count > 1]
+	report["duplicate_asset_ids"] = [value for value, count in Counter(asset_ids).items() if value and count > 1]
 	catalog_path = settings.persistent_data_dir / "catalog.json"
 	if catalog_path.exists():
 		try:

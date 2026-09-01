@@ -1,0 +1,77 @@
+"""Canonical Inventory update behavior."""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from inventory.storage import format_asset_id
+from inventory.update import update_item
+
+
+class InventoryUpdateTests(unittest.TestCase):
+	def setUp(self):
+		self.temp = tempfile.TemporaryDirectory()
+		self.root = Path(self.temp.name) / "inventory"
+		self.settings = SimpleNamespace(persistent_data_dir=self.root, items_dir=self.root / "items")
+		self.item_id = "INV-20260901-204535-601208be"
+		self.item = self.settings.items_dir / self.item_id
+		(self.item / "images").mkdir(parents=True)
+		(self.item / "images" / "old-front.jpg").write_bytes(b"front")
+		(self.item / "images" / "old-page.jpg").write_bytes(b"page")
+		manifest = {
+			"schema": "hermes-inventory-item", "schema_version": 1, "inventory_id": self.item_id,
+			"asset_id": "000-011", "status": "synced", "item": {"name": "Cyberpunk 2077: No Coincidence", "category": "Book", "manufacturer": "CD Projekt", "description": "old", "condition": []},
+			"identifiers": {"isbn_13": ["9780000000001"]}, "attributes": [{"name": "Format", "value": "Trade Paperback"}],
+			"images": [{"relative_path": "images/old-front.jpg", "sha256": "x"}, {"relative_path": "images/old-page.jpg", "sha256": "y"}],
+			"homebox": {"entity_id": "entity-1", "attachments": [{"id": "a1"}]}, "field_sources": {}, "history": [],
+		}
+		(self.item / "item.json").write_text(json.dumps(manifest), encoding="utf-8")
+		(self.item / "vision.json").write_text(json.dumps({"source_images": ["old-front.jpg", "old-page.jpg"]}), encoding="utf-8")
+
+	def tearDown(self): self.temp.cleanup()
+
+	def test_asset_id_formatting_crosses_thousand_boundary(self):
+		self.assertEqual(format_asset_id(11), "000-011")
+		self.assertEqual(format_asset_id(999), "000-999")
+		self.assertEqual(format_asset_id(1000), "001-000")
+
+	def test_edit_by_asset_id_preserves_ids_images_and_marks_manual_override(self):
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as homebox:
+			result = update_item("000-011", "edit", {"purchase_price": 14.99, "purchase_from": "Half Price Books - Tacoma, WA", "attributes": [{"name": "Format", "value": "Hardcover"}]}, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(result["status"], "updated")
+		self.assertEqual(manifest["asset_id"], "000-011")
+		self.assertEqual(manifest["inventory_id"], self.item_id)
+		self.assertEqual(manifest["purchase_price"], 14.99)
+		self.assertEqual(manifest["attributes"][0]["value"], "Hardcover")
+		self.assertEqual(manifest["field_sources"]["attributes"], "user")
+		self.assertEqual(len(manifest["images"]), 2)
+		self.assertEqual(manifest["history"][-1]["operation"], "edit")
+		homebox.assert_called_once()
+
+	def test_reanalysis_preserves_manual_format_and_uses_durable_images(self):
+		self.test_edit_by_asset_id_preserves_ids_images_and_marks_manual_override()
+		def vision(directory, client, *, metadata_path):
+			self.assertEqual(Path(directory), self.item / "images")
+			return ({"source_directory": str(directory), "source_images": ["old-front.jpg"], "parse_status": "json_ok", "result": {"object_type": {"value": "Book"}, "product_or_title": {"value": "Cyberpunk 2077: No Coincidence"}, "manufacturer_or_publisher": {"value": "CD Projekt"}, "physical_description": {"value": "new"}, "attributes": [{"name": "Format", "value": "Trade Paperback"}]}}, metadata_path)
+		with patch("inventory.update.run_vision", side_effect=vision), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item(self.item_id, "reanalyze", vision_client=object(), settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["attributes"][0]["value"], "Hardcover")
+		self.assertTrue(list((self.item / "history").glob("vision-*.json")))
+
+	def test_ambiguous_name_does_not_mutate(self):
+		other = self.settings.items_dir / "INV-other"; other.mkdir(parents=True)
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["inventory_id"] = "INV-other"; payload["asset_id"] = "000-012"; payload["item"]["name"] = "Cyberpunk guide"
+		(other / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		result = update_item("Cyberpunk", "edit", {"name": "changed"}, settings=self.settings)
+		self.assertEqual(result["status"], "ambiguous")
+
+	def test_resync_does_not_run_vision(self):
+		with patch("inventory.update.run_vision", side_effect=AssertionError("vision")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as sync:
+			result = update_item("9780000000001", "resync", settings=self.settings)
+		self.assertEqual(result["operation"], "resync")
+		self.assertFalse(sync.call_args.kwargs["upload_attachments"])

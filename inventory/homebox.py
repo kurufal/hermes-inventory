@@ -145,6 +145,10 @@ def build_notes(record):
 			+ "\n".join(condition_lines)
 		)
 
+	user_notes = str(record.get("notes", "")).strip()
+	if user_notes:
+		sections.append("User notes\n" + user_notes)
+
 	sections.append(
 		"Inventory metadata generated from "
 		"local image analysis."
@@ -167,6 +171,7 @@ def create_entity(record):
 		),
 		"entityTypeId": entity_type["id"],
 		"quantity": 1,
+		"assetId": record.get("asset_id", ""),
 	}
 
 	response = requests.post(
@@ -221,22 +226,19 @@ def update_entity(entity_id, record):
 			"quantity",
 			1,
 		),
-		"assetId": current.get(
-			"assetId",
-			"",
-		),
-		"purchasePrice": current.get(
+		"assetId": record.get("asset_id", current.get("assetId", "")),
+		"purchasePrice": record.get("purchase_price", current.get(
 			"purchasePrice",
 			0,
-		),
-		"purchaseDate": current.get(
+		)),
+		"purchaseDate": record.get("purchase_date", current.get(
 			"purchaseDate",
 			"",
-		),
-		"purchaseFrom": current.get(
+		)),
+		"purchaseFrom": record.get("purchase_from", current.get(
 			"purchaseFrom",
 			"",
-		),
+		)),
 		"warrantyExpires": current.get(
 			"warrantyExpires",
 			"",
@@ -485,6 +487,7 @@ def complete_entity(
 	record,
 	*,
 	image_directory=None,
+	upload_attachments=True,
 ):
 	updated = update_entity(
 		entity_id,
@@ -504,6 +507,8 @@ def complete_entity(
 	)
 
 	attachments = []
+	if not upload_attachments:
+		return {"entity": updated, "attachments": attachments}
 
 	primary_filename = choose_primary_image(
 		record

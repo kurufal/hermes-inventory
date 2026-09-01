@@ -7,6 +7,8 @@ import os
 import tempfile
 import shutil
 import uuid
+import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,90 @@ from typing import Any
 from inventory.config import get_settings
 from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION
 from inventory.media import mime_type
+
+
+_ASSET_LOCK = threading.Lock()
+_ASSET_RE = re.compile(r"^\d{3}-\d{3}$")
+
+
+def format_asset_id(number: int) -> str:
+	if number < 1 or number > 999999:
+		raise ValueError("Asset ID number must be between 1 and 999999")
+	text = f"{number:06d}"
+	return f"{text[:3]}-{text[3:]}"
+
+
+def allocate_asset_id(settings, requested: str | None = None) -> str:
+	with _ASSET_LOCK:
+		used = set()
+		for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
+			try:
+				asset_id = json.loads(path.read_text(encoding="utf-8")).get("asset_id", "")
+				if _ASSET_RE.fullmatch(str(asset_id)):
+					used.add(str(asset_id))
+			except (OSError, json.JSONDecodeError):
+				continue
+		if requested:
+			if not _ASSET_RE.fullmatch(requested):
+				raise ValueError("Asset ID must use NNN-NNN format")
+			if requested in used:
+				raise ValueError(f"Asset ID is already in use: {requested}")
+			return requested
+		for number in range(1, 1000000):
+			candidate = format_asset_id(number)
+			if candidate not in used:
+				return candidate
+		raise RuntimeError("No Asset IDs remain")
+
+
+def _slug(value: str, limit: int) -> str:
+	value = re.sub(r"[^a-z0-9]+", "-", str(value).casefold()).strip("-")
+	return (value[:limit].strip("-") or "item")
+
+
+def canonical_image_name(asset_id: str, name: str, role: str, extension: str, index: int = 1) -> str:
+	role = _slug(role, 30)
+	suffix = f"_{index:02d}" if index > 1 else ""
+	return f"{asset_id}_{_slug(name, 40)}_{role}{suffix}{extension.lower()}"
+
+
+def canonicalize_images(record: dict[str, Any], image_dir: Path) -> None:
+	"""Rename only files in an Inventory transaction/canonical images directory."""
+	asset_id = record.get("asset_id")
+	if not _ASSET_RE.fullmatch(str(asset_id)):
+		raise ValueError("A valid Asset ID is required before canonicalizing images")
+	roles = {str(entry.get("filename")): str(entry.get("inferred_role") or "image") for entry in record.get("image_roles", []) if isinstance(entry, dict)}
+	mapping, role_counts = [], {}
+	for source_name in record.get("source_images", []):
+		source = image_dir / source_name
+		if not source.is_file():
+			raise FileNotFoundError(source)
+		role = roles.get(source_name, "image")
+		role_key = _slug(role, 30)
+		role_counts[role_key] = role_counts.get(role_key, 0) + 1
+		target_name = canonical_image_name(str(asset_id), record.get("name", ""), role, source.suffix, role_counts[role_key])
+		mapping.append((source_name, target_name))
+	if len({target for _, target in mapping}) != len(mapping):
+		raise RuntimeError("Canonical image names would collide")
+	temporary = {}
+	for source_name, target_name in mapping:
+		if source_name != target_name:
+			staged = image_dir / f".rename-{uuid.uuid4().hex}"
+			os.replace(image_dir / source_name, staged)
+			temporary[source_name] = staged
+	for source_name, target_name in mapping:
+		if source_name != target_name:
+			os.replace(temporary[source_name], image_dir / target_name)
+	originals = dict(record.get("source_filenames", {}))
+	name_map = dict(mapping)
+	record["source_images"] = [name_map[name] for name in record.get("source_images", [])]
+	record["source_filenames"] = {name_map[name]: originals.get(name, name) for name in name_map}
+	for entry in record.get("image_roles", []):
+		if isinstance(entry, dict) and entry.get("filename") in name_map:
+			entry["filename"] = name_map[entry["filename"]]
+	for entry in record.get("image_hashes", []):
+		if isinstance(entry, dict) and entry.get("filename") in name_map:
+			entry["filename"] = name_map[entry["filename"]]
 
 
 def _timestamp() -> str:
@@ -92,6 +178,7 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"schema": ITEM_SCHEMA,
 		"schema_version": SCHEMA_VERSION,
 		"inventory_id": item_id,
+		"asset_id": record.get("asset_id") or previous.get("asset_id"),
 		"created_at": previous.get("created_at", _timestamp()),
 		"updated_at": _timestamp(),
 		"status": status,
@@ -105,6 +192,8 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"homebox": homebox or previous.get("homebox", {"entity_id": None, "asset_id": None, "collection_id": None, "entity_type": None, "last_synced_at": None}),
 		"vision": {"raw_metadata_relative_path": "vision.json", "parse_status": raw_metadata.get("parse_status")},
 		"error": error,
+		"field_sources": previous.get("field_sources", record.get("field_sources", {})),
+		"history": previous.get("history", []),
 	}
 
 
@@ -142,7 +231,7 @@ def write_catalog(settings=None) -> Path:
 		manifest = json.loads(candidate.read_text(encoding="utf-8"))
 		item = manifest.get("item", {})
 		images = manifest.get("images", [])
-		items.append({"inventory_id": manifest.get("inventory_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "primary_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})
+		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "primary_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})
 	path = settings.persistent_data_dir / "catalog.json"
 	atomic_json_write(path, {"schema": CATALOG_SCHEMA, "schema_version": SCHEMA_VERSION, "updated_at": _timestamp(), "items": items})
 	return path

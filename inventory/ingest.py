@@ -14,7 +14,7 @@ from inventory.media import is_supported_image
 from inventory.normalize import normalize_record
 from inventory.storage import (
 	abandon_item_transaction, atomic_json_write, begin_item_transaction,
-	build_manifest, commit_item_transaction, load_manifest, write_catalog, write_manifest,
+	allocate_asset_id, build_manifest, canonicalize_images, commit_item_transaction, load_manifest, write_catalog, write_manifest,
 )
 from inventory.vision import analyze_directory
 
@@ -87,8 +87,6 @@ def ingest(source_directory, vision_client, *, settings=None):
 		atomic_json_write(metadata_path, raw)
 		record = normalize_record(raw)
 		record["source_filenames"] = provenance
-		initial = build_manifest(item_id, record, raw, images_dir, status="pending_homebox_create")
-		write_manifest(initial, transaction / "item.json", settings)
 		duplicate_result = check_homebox_duplicates(record)
 		if duplicate_result["classification"] != "NEW_ITEM":
 			save_duplicate_observation(item_id, record, raw, duplicate_result, images_dir, settings)
@@ -96,6 +94,10 @@ def ingest(source_directory, vision_client, *, settings=None):
 			result = {"status": "duplicate_candidate", "created": False, "durable": True, "item_id": item_id, "classification": duplicate_result["classification"], "duplicate_check": duplicate_result}
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
+		record["asset_id"] = allocate_asset_id(settings)
+		canonicalize_images(record, images_dir)
+		initial = build_manifest(item_id, record, raw, images_dir, status="pending_homebox_create")
+		write_manifest(initial, transaction / "item.json", settings)
 		final_item_root = commit_item_transaction(transaction, item_id, settings)
 		final_images_dir = final_item_root / "images"
 		record["source_directory"] = str(final_images_dir)
@@ -118,7 +120,7 @@ def ingest(source_directory, vision_client, *, settings=None):
 			result = {"status": "pending_homebox_sync", "created": False, "durable": True, "item_id": item_id, "homebox_entity_id": entity_id, "error": str(exc)}
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
-		result = {"status": "created", "created": True, "durable": True, "item_id": item_id, "homebox_entity_id": entity_id, "asset_id": completed.get("entity", {}).get("assetId"), "name": record.get("name"), "category": record.get("category"), "manufacturer": record.get("manufacturer"), "duplicate_check": duplicate_result, "attachments": completed.get("attachments", [])}
+		result = {"status": "created", "created": True, "durable": True, "item_id": item_id, "inventory_id": item_id, "homebox_entity_id": entity_id, "asset_id": record["asset_id"], "name": record.get("name"), "category": record.get("category"), "manufacturer": record.get("manufacturer"), "duplicate_check": duplicate_result, "attachments": completed.get("attachments", [])}
 		homebox_entity = completed.get("entity", {})
 		write_manifest(build_manifest(item_id, record, raw, final_images_dir, status="synced", homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": homebox_entity.get("groupId"), "entity_type": homebox_entity.get("entityType", {}).get("id") or created.get("entityTypeId"), "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "fields": homebox_entity.get("fields"), "tags": homebox_entity.get("tags"), "location": homebox_entity.get("location"), "attachments": completed.get("attachments", [])}, previous=previous_manifest), settings=settings)
 		write_catalog(settings)

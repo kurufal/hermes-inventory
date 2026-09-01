@@ -135,6 +135,18 @@ Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging 
 
 `/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
 
+## Updating Items
+
+Use `inventory_update` for factual corrections, durable-image reanalysis, and HomeBox resyncs. Target the item from the prior result with its Asset ID (for example, `000-011`) or immutable Inventory ID (for example, `INV-20260901-204535-601208be`). The Asset ID is the readable label; the Inventory ID remains the recovery identity.
+
+```text
+inventory_update target=000-011 operation=edit changes={"attributes":[{"name":"Format","value":"Hardcover"}],"purchase_from":"Half Price Books - Tacoma, WA","purchase_price":14.99}
+inventory_update target=000-011 operation=reanalyze
+inventory_update target=000-011 operation=resync
+```
+
+Edits are marked user-owned and survive later reanalysis. Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg`; manifests retain each original filename and checksum. An ambiguous target produces candidates and does not change anything.
+
 ## Backup and Recovery
 
 Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Backups exclude runtime state and secrets; recovery is non-destructive.

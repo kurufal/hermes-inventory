@@ -146,8 +146,8 @@ class IngestCommittedImageTests(unittest.TestCase):
 			directory = Path(image_directory)
 			self.homebox_directories.append(directory)
 			self.assertEqual(Path(record["source_directory"]), directory)
-			self.assertTrue((directory / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").is_file())
-			self.assertTrue((directory / "composer_2026-09-01_20-16-27-691_575083.jpg").is_file())
+			self.assertTrue(all((directory / name).is_file() for name in record["source_images"]))
+			self.assertTrue(all(name.startswith(record["asset_id"] + "_") for name in record["source_images"]))
 			if complete_side_effect:
 				raise complete_side_effect
 			return {"entity": {"assetId": "asset-1", "groupId": "group-1", "entityType": {"id": "type-1"}}, "attachments": [{"id": "attachment-1"}, {"id": "attachment-2"}]}
@@ -164,8 +164,6 @@ class IngestCommittedImageTests(unittest.TestCase):
 		item_root = self.settings.items_dir / result["item_id"]
 		images = item_root / "images"
 		self.assertTrue(item_root.is_dir())
-		self.assertTrue((images / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").is_file())
-		self.assertTrue((images / "composer_2026-09-01_20-16-27-691_575083.jpg").is_file())
 		self.assertTrue((item_root / "item.json").is_file())
 		self.assertTrue((item_root / "vision.json").is_file())
 		self.assertFalse(list(self.settings.items_dir.glob(".tmp-*")))
@@ -175,6 +173,8 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.assertNotIn(".tmp-", json.dumps(raw))
 		self.assertEqual(raw["source_directory"], str(images))
 		self.assertEqual(len(manifest["images"]), 2)
+		self.assertTrue(all((images / Path(image["relative_path"]).name).is_file() for image in manifest["images"]))
+		self.assertTrue(all(Path(image["relative_path"]).name.startswith(manifest["asset_id"] + "_") for image in manifest["images"]))
 		self.assertEqual({image["source_filename"] for image in manifest["images"]}, {
 			"composer_2026-09-01_20-16-27-642_9b27f5.jpg",
 			"composer_2026-09-01_20-16-27-691_575083.jpg",

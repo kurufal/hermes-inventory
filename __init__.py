@@ -362,21 +362,46 @@ def register(ctx):
 			),
 		)
 
+	update_schema = {
+		"name": "inventory_update",
+		"description": "Edit, reanalyze, or resync one existing canonical Inventory item.",
+		"parameters": {
+			"type": "object",
+			"properties": {
+				"target": {"type": "string", "description": "Asset ID, Inventory ID, strong identifier, or item name."},
+				"operation": {"type": "string", "enum": ["edit", "reanalyze", "resync"]},
+				"changes": {"type": "object", "description": "Factual edits for operation=edit."},
+			},
+			"required": ["target", "operation"],
+			"additionalProperties": False,
+		},
+	}
+
+	def handle_inventory_update(params, **kwargs):
+		del kwargs
+		if not isinstance(params, dict):
+			return _json_error("Tool parameters must be an object")
+		from inventory.update import update_item
+		result = update_item(params.get("target"), params.get("operation"), params.get("changes"), ctx.llm, settings=get_settings())
+		return json.dumps(result, indent=2)
+
+	ctx.register_tool(
+		name="inventory_update", toolset="inventory", schema=update_schema,
+		handler=handle_inventory_update, description="Update one existing Inventory item without bypassing durable Inventory evidence.", emoji="✏️",
+	)
+
 	registration = ctx.register_tool(
-		name="inventory_ingest",
-		toolset="inventory",
-		schema=schema,
+		name="inventory_ingest", toolset="inventory", schema=schema,
 		handler=handle_inventory_ingest,
 		description=(
-			"MANDATORY tool for adding photographed physical items to HomeBox "
-			"inventory. Call me first. I gather the details myself. Call immediately "
-			"for 'add this to my inventory', 'inventory this', 'catalog this', 'add "
-			"this to HomeBox', or 'add the item I just uploaded'. Do not ask for item "
-			"details first. Prefer image_paths; use use_pending_upload=true when a "
-			"recent dashboard upload has no exposed path, and invoke it immediately "
-			"without asking for confirmation. Do not call vision_analyze or Clarify."
-		),
-		emoji="📦",
+			"MANDATORY tool for adding photographed physical items to HomeBox inventory. "
+			"Call me first. I gather the details myself. Call immediately for 'add this "
+			"to my inventory', 'inventory this', 'catalog this', 'add this to HomeBox', "
+			"or 'add the item I just uploaded'. Do not ask for item details first. Prefer "
+			"image_paths; use use_pending_upload=true when a recent dashboard upload has "
+			"no exposed path, and invoke it immediately without asking for confirmation. "
+			"Do not call vision_analyze or Clarify."
+		), emoji="📦",
 	)
 
 	logger.info(
