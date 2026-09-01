@@ -9,6 +9,13 @@ When `inventory_ingest` returns `not_configured`, direct the user to
 Configuration may be Windows Desktop or Docker/container based; use resolved
 paths reported by `/inventory setup`, and never assume a host path is visible
 inside a container.
+Explicit existing Desktop paths under the trusted Hermes `composer-images` root
+are valid current attachments; that directory is never background-watched.
+If a deferred `tool_call` fails once with a bridge error such as "requires a
+name argument" after discovery succeeds, do not repeat the same call endlessly,
+inspect plugin source, reverse-engineer HomeBox, or bypass this plugin. Report
+the Hermes bridge failure and point to Inventory troubleshooting. Never call
+raw HomeBox APIs as a replacement for `inventory_ingest` and never solicit keys.
 
 Treat these as direct inventory commands:
 

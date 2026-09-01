@@ -115,6 +115,15 @@ class InventorySettingsTests(unittest.TestCase):
 			write_homebox_api_key("secret", SimpleNamespace())
 		self.assertEqual(calls, [("HOMEBOX_API_KEY", "secret")])
 
+	def test_homebox_secret_prefers_hermes_cli_environment_helpers(self):
+		from inventory.config import environment_value, write_homebox_api_key
+		calls = []
+		helper = SimpleNamespace(get_env_value=lambda name: "hb_from_helper", save_env_value=lambda name, value: calls.append((name, value)))
+		with patch.dict(sys.modules, {"hermes_cli.config": helper}):
+			self.assertEqual(environment_value("HOMEBOX_API_KEY"), "hb_from_helper")
+			write_homebox_api_key("hb_new", SimpleNamespace())
+		self.assertEqual(calls, [("HOMEBOX_API_KEY", "hb_new")])
+
 	def test_default_persistent_inventory_is_not_in_hermes_media_directories(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):

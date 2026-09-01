@@ -19,18 +19,18 @@ The checkout contains `plugin.yaml`, `__init__.py`, `inventory\`, and `skills\`.
 
 ### Step 3: Restart and enable
 
-Fully close and reopen Hermes Desktop. Open **Settings** > **Plugins** > **Agent plugins**, enable `hermes-inventory`, then start a new chat.
+Fully close and reopen Hermes Desktop. Open **Settings** > **Plugins** > **Agent plugins** and enable `hermes-inventory`. Fully restart Hermes Desktop again after enabling it, then start a new chat. Plugin registrations apply to new sessions.
 
 ### Step 4: Setup
 
 ```text
 /inventory setup
-/inventory setup storage \\server\share\HermesInventory
-/inventory setup homebox http://host:port
+/inventory setup storage \\192.168.1.160\hermes-data
+/inventory setup homebox http://192.168.1.160:3100
 /inventory setup secrets
 ```
 
-Storage defaults to `%LOCALAPPDATA%\hermes\inventory` (more precisely, `$HERMES_HOME\inventory`) and needs no acceptance step. The storage command checks access before saving and never moves existing Inventory data. When the API key is missing, `/inventory setup secrets` explains the secure terminal command:
+Storage defaults to `%LOCALAPPDATA%\hermes\inventory` (more precisely, `$HERMES_HOME\inventory`) and needs no acceptance step, but setup marks it as a local-default warning so a NAS choice is visible. A parent such as `\\192.168.1.160\hermes-data` resolves to `\\192.168.1.160\hermes-data\inventory`; a path already ending in `inventory` is used as the exact root. The storage command checks access before saving and never moves existing Inventory data. When the API key is missing, `/inventory setup secrets` explains the secure terminal command:
 
 ```powershell
 hermes inventory setup --secrets
@@ -53,7 +53,8 @@ The plugin sees paths inside the container only. For a host data root mounted at
 ```text
 HOST PATH:      /mnt/Data16/media/hermes-data
 CONTAINER PATH: /opt/data
-PLUGIN PATH:    /opt/data/images
+PLUGIN PATH:    /opt/data/plugins/hermes-inventory
+UPLOAD PATH:    /opt/data/images
 ```
 
 Clone into the host-mounted plugin directory, then restart or redeploy the container:
@@ -96,7 +97,7 @@ API keys are never accepted as slash-command arguments and never appear in outpu
 
 Automatic detection watches only `$HERMES_HOME/images` and only Hermes-managed `dashboard_*`, `upload_*`, and `clip_*` image filenames. It supports existing Dashboard filenames such as `dashboard_20260815_190339_<id>_signal-photo.jpg` and Desktop upload/clip names.
 
-`$HERMES_HOME/media`, `$HERMES_HOME/image_cache`, and `$HERMES_HOME/user_media` are never automatically scanned. The internal Python `ingest(source_directory, ...)` API can use an explicitly supplied source directory for development/testing, but arbitrary manual directories are intentionally not accepted by the chat tool: it only accepts Hermes attachment paths under `$HERMES_HOME/images`.
+`$HERMES_HOME/media`, `$HERMES_HOME/image_cache`, and `$HERMES_HOME/user_media` are never automatically scanned. Desktop composer images at `%APPDATA%\Hermes\composer-images` are also never watched, but an existing path Hermes explicitly supplies in `image_paths` is trusted on a local Desktop backend. The internal Python `ingest(source_directory, ...)` API can use an explicitly supplied source directory for development/testing. The chat tool otherwise accepts only `$HERMES_HOME/images` and trusted current Desktop composer paths, never arbitrary filesystem paths. A composer path unavailable to a remote Linux/Docker backend is rejected rather than guessed.
 
 ## Updating the Plugin
 
@@ -107,7 +108,7 @@ cd "$env:LOCALAPPDATA\hermes\plugins\hermes-inventory"
 git pull
 ```
 
-Restart Hermes Desktop and start a new chat.
+Fully close Hermes Desktop, reopen it, and verify `hermes-inventory` remains enabled. If it must be enabled again, restart Hermes Desktop a second time. Start a new chat/session.
 
 For Docker management UIs, determine the host-mounted Hermes data directory, update `<host Hermes data>/plugins/hermes-inventory` with Git, restart/redeploy the Hermes container, then start a new Hermes session. No verified dashboard plugin update control is available, so this document does not claim one exists.
 
@@ -150,3 +151,29 @@ The direct Python ingestion API accepts explicitly supplied local source directo
 python -m unittest discover -s tests -q
 python -m compileall -q .
 ```
+
+## Troubleshooting
+
+### Tool Search bridge error
+
+If Hermes discovers and describes `inventory_ingest`, then reports `tool_call requires a 'name' argument`, the failure may be the Hermes deferred Tool Search bridge rather than Inventory registration or HomeBox. Do not manually call HomeBox as a substitute: Inventory owns durable photos, duplicate checks, recovery metadata, and linkage. An optional Hermes configuration workaround is:
+
+```yaml
+tools:
+	tool_search:
+		enabled: off
+```
+
+This keeps plugin/MCP schemas eager and can increase tool-schema context usage. The plugin does not edit this setting; restart Hermes and start a new session after changing it. No verified Desktop UI location for this setting is available.
+
+### Desktop attachment rejected
+
+Current versions accept explicit existing local paths below `%APPDATA%\Hermes\composer-images`. A remote backend cannot read a Windows Desktop-client path; use a local backend or a valid recent backend upload batch.
+
+### HomeBox 401
+
+The server was reached but rejected the credential. Current HomeBox static keys normally start with `hb_`. Run `hermes inventory setup --secrets` and enter a current key; the key is hidden and never echoed.
+
+### Storage unavailable: WinError 67
+
+The SMB share itself must already exist. Inventory may create its `inventory` child beneath an existing share, but it cannot create a missing SMB share.

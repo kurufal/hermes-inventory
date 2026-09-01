@@ -7,7 +7,7 @@ from pathlib import Path
 
 from inventory.config import (
 	ConfigurationError, get_settings, homebox_api_key, homebox_url, storage_health,
-	write_homebox_api_key, write_homebox_url, write_storage_config,
+	storage_root_for_setup, write_homebox_api_key, write_homebox_url, write_storage_config,
 )
 from inventory.constants import PLUGIN_VERSION
 
@@ -31,7 +31,9 @@ def _verification(settings):
 	checks = []
 	for label, path in (("Persistent storage", settings.persistent_data_dir), ("Hermes upload directory", settings.hermes_images_dir), ("Inventory runtime", settings.runtime_dir)):
 		ok, reason = storage_health(path)
-		checks.append(("PASS" if ok else "FAIL", label, reason))
+		state = "WARN" if label == "Persistent storage" and settings.persistent_source == "default" and ok else ("PASS" if ok else "FAIL")
+		detail = "using local default" if state == "WARN" else reason
+		checks.append((state, label, detail))
 	url, key = homebox_url(settings), homebox_api_key()
 	checks.append(("PASS" if url else "FAIL", "HomeBox URL", ""))
 	checks.append(("PASS" if key else "FAIL", "HomeBox API key", ""))
@@ -57,6 +59,7 @@ def _status(settings):
 		f"Hermes uploads: {settings.hermes_images_dir}",
 		f"Inventory runtime: {settings.runtime_dir}",
 		f"Inventory persistent data: {settings.persistent_data_dir}",
+		f"Persistent source: {settings.persistent_source}",
 		f"HomeBox URL: {'configured' if homebox_url(settings) else 'missing'}",
 		f"HomeBox API key: {'configured' if homebox_api_key() else 'missing'}",
 	])
@@ -74,6 +77,8 @@ def _setup_status(settings):
 		lines.extend(["", "HomeBox authentication failed.", "Run:", "/inventory setup secrets"])
 	else:
 		lines.extend(["", "Configure HomeBox URL with:", "/inventory setup homebox <url>"])
+	if settings.persistent_source == "default":
+		lines.extend(["", "Persistent storage is using the local default:", str(settings.persistent_data_dir), "For permanent/NAS storage:", "/inventory setup storage <path>"])
 	return "\n".join(lines)
 
 
@@ -87,6 +92,8 @@ def inventory_cli(args=None):
 		return "HomeBox URL is missing. Configure it first with: /inventory setup homebox <url>"
 	existing = homebox_api_key()
 	value = getpass.getpass("HomeBox API key (Enter to retain existing key): " if existing else "HomeBox API key: ")
+	if value and not value.startswith("hb_"):
+		return "HomeBox API key was not saved: current HomeBox static API keys must start with hb_.\nRetry with: hermes inventory setup --secrets"
 	if value:
 		write_homebox_api_key(value, settings)
 	if not value and not existing:
@@ -130,17 +137,17 @@ def inventory_command(raw_args="", **kwargs):
 				return _help("setup")
 			if os.environ.get("INVENTORY_BASE_DIR", "").strip():
 				return "INVENTORY_BASE_DIR environment variable has higher priority and cannot be overridden."
-			candidate = Path(value)
+			candidate = storage_root_for_setup(value)
 			ok, reason = storage_health(candidate)
 			if not ok:
 				return f"Storage not changed; destination is unavailable: {reason}"
 			write_storage_config(candidate)
-			return f"Storage configured: {value}\nExisting data was not moved."
+			return f"Storage configured.\n\nRequested parent:\n{value}\n\nInventory root:\n{candidate}\n\nStorage test: PASS\nExisting Inventory data was not moved."
 		if operation == "homebox":
 			if not value:
 				return _help("setup")
 			write_homebox_url(value)
-			return f"HomeBox URL configured: {value}"
+			return f"HomeBox URL configured: {homebox_url(settings)}"
 		return _help("setup")
 	if command == "status":
 		return _status(settings)

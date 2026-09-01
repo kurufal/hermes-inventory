@@ -13,5 +13,8 @@ def setup_inventory_cli(parser):
 def handle_inventory_cli(namespace):
 	"""Dispatch Hermes' parsed argparse namespace without accepting key text."""
 	if getattr(namespace, "inventory_command", None) == "setup" and getattr(namespace, "secrets", False):
-		return inventory_cli(["setup", "--secrets"])
-	return inventory_cli([])
+		result = inventory_cli(["setup", "--secrets"])
+	else:
+		result = inventory_cli([])
+	print(result)
+	return result

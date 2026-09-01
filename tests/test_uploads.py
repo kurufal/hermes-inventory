@@ -109,6 +109,14 @@ class PendingUploadTests(unittest.TestCase):
 		self.assertEqual(self.observe(), 0)
 		self.assertEqual(self.read_state()["batches"], [])
 
+	def test_composer_images_are_never_automatically_scanned(self):
+		composer = self.root / "Roaming" / "Hermes" / "composer-images"
+		composer.mkdir(parents=True)
+		(composer / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").write_bytes(b"image")
+
+		self.assertEqual(self.observe(), 0)
+		self.assertEqual(self.read_state()["batches"], [])
+
 	def test_malformed_dashboard_filename_uses_detected_time(self):
 		path = self.add_image("dashboard_not-a-timestamp.png")
 

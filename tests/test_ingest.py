@@ -87,11 +87,15 @@ class IngestCommittedImageTests(unittest.TestCase):
 	def setUp(self):
 		self.temporary_directory = tempfile.TemporaryDirectory()
 		self.root = Path(self.temporary_directory.name)
-		self.source = self.root / "user_media" / "next-item"
+		self.source = self.root / "Roaming" / "Hermes" / "composer-images"
 		self.source.mkdir(parents=True)
-		(self.source / "camera-front.jpg").write_bytes(b"source-image")
+		(self.source / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").write_bytes(b"front-image")
+		(self.source / "composer_2026-09-01_20-16-27-691_575083.jpg").write_bytes(b"back-image")
 		(self.source / ".inventory-provenance.json").write_text(
-			json.dumps({"camera-front.jpg": "upload_20260831_120000_front.jpg"}),
+			json.dumps({
+				"composer_2026-09-01_20-16-27-642_9b27f5.jpg": "composer_2026-09-01_20-16-27-642_9b27f5.jpg",
+				"composer_2026-09-01_20-16-27-691_575083.jpg": "composer_2026-09-01_20-16-27-691_575083.jpg",
+			}),
 			encoding="utf-8",
 		)
 		self.settings = SimpleNamespace(
@@ -110,11 +114,12 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.vision_directories.append(image_directory)
 		self.assertTrue(image_directory.name == "images")
 		self.assertTrue(image_directory.parent.name.startswith(".tmp-"))
-		self.assertTrue((image_directory / "camera-front.jpg").is_file())
+		self.assertTrue((image_directory / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").is_file())
+		self.assertTrue((image_directory / "composer_2026-09-01_20-16-27-691_575083.jpg").is_file())
 		raw = {
 			"item_id": image_directory.parent.name,
 			"source_directory": str(image_directory),
-			"source_images": ["camera-front.jpg"],
+			"source_images": ["composer_2026-09-01_20-16-27-642_9b27f5.jpg", "composer_2026-09-01_20-16-27-691_575083.jpg"],
 			"parse_status": "json_ok",
 			"result": {
 				"object_type": {"value": "Camera", "confidence": 1.0},
@@ -122,7 +127,10 @@ class IngestCommittedImageTests(unittest.TestCase):
 				"manufacturer_or_publisher": {"value": "Hermes", "confidence": 1.0},
 				"identifiers": {"serial_number": ["SER-1"]},
 				"physical_description": {"value": "Test item", "confidence": 1.0},
-				"image_roles": [{"filename": "camera-front.jpg", "inferred_role": "front", "confidence": 1.0}],
+				"image_roles": [
+					{"filename": "composer_2026-09-01_20-16-27-642_9b27f5.jpg", "inferred_role": "front", "confidence": 1.0},
+					{"filename": "composer_2026-09-01_20-16-27-691_575083.jpg", "inferred_role": "back", "confidence": 1.0},
+				],
 			},
 		}
 		metadata_path.write_text(json.dumps(raw), encoding="utf-8")
@@ -138,10 +146,11 @@ class IngestCommittedImageTests(unittest.TestCase):
 			directory = Path(image_directory)
 			self.homebox_directories.append(directory)
 			self.assertEqual(Path(record["source_directory"]), directory)
-			self.assertTrue((directory / "camera-front.jpg").is_file())
+			self.assertTrue((directory / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").is_file())
+			self.assertTrue((directory / "composer_2026-09-01_20-16-27-691_575083.jpg").is_file())
 			if complete_side_effect:
 				raise complete_side_effect
-			return {"entity": {"assetId": "asset-1", "groupId": "group-1", "entityType": {"id": "type-1"}}, "attachments": [{"id": "attachment-1"}]}
+			return {"entity": {"assetId": "asset-1", "groupId": "group-1", "entityType": {"id": "type-1"}}, "attachments": [{"id": "attachment-1"}, {"id": "attachment-2"}]}
 
 		with patch("inventory.ingest.run_vision", side_effect=self.fake_vision), patch(
 			"inventory.ingest.check_homebox_duplicates",
@@ -155,7 +164,8 @@ class IngestCommittedImageTests(unittest.TestCase):
 		item_root = self.settings.items_dir / result["item_id"]
 		images = item_root / "images"
 		self.assertTrue(item_root.is_dir())
-		self.assertTrue((images / "camera-front.jpg").is_file())
+		self.assertTrue((images / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").is_file())
+		self.assertTrue((images / "composer_2026-09-01_20-16-27-691_575083.jpg").is_file())
 		self.assertTrue((item_root / "item.json").is_file())
 		self.assertTrue((item_root / "vision.json").is_file())
 		self.assertFalse(list(self.settings.items_dir.glob(".tmp-*")))
@@ -164,7 +174,11 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.assertNotIn(".tmp-", json.dumps(manifest))
 		self.assertNotIn(".tmp-", json.dumps(raw))
 		self.assertEqual(raw["source_directory"], str(images))
-		self.assertEqual(manifest["images"][0]["source_filename"], "upload_20260831_120000_front.jpg")
+		self.assertEqual(len(manifest["images"]), 2)
+		self.assertEqual({image["source_filename"] for image in manifest["images"]}, {
+			"composer_2026-09-01_20-16-27-642_9b27f5.jpg",
+			"composer_2026-09-01_20-16-27-691_575083.jpg",
+		})
 		return item_root, images, manifest
 
 	def test_attachments_use_final_committed_image_directory(self):

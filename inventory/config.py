@@ -6,8 +6,10 @@ import math
 import os
 import json
 import re
+import sys
 import tempfile
 import uuid
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -77,12 +79,18 @@ def _load_config_document(hermes_home: Path) -> tuple[dict[str, Any], Path]:
 def environment_value(name: str) -> str:
 	"""Read a Hermes-managed environment value without import-time caching."""
 	try:
-		from hermes_constants import get_environment_value
-		value = get_environment_value(name)
+		from hermes_cli.config import get_env_value
+		value = get_env_value(name)
 		if value is not None:
 			return str(value)
 	except (ImportError, AttributeError, TypeError):
-		pass
+		try:
+			from hermes_constants import get_environment_value
+			value = get_environment_value(name)
+			if value is not None:
+				return str(value)
+		except (ImportError, AttributeError, TypeError):
+			pass
 	return os.environ.get(name, "")
 
 
@@ -110,6 +118,37 @@ def _configured_path(value: Any, name: str) -> Path | None:
 	if not _is_absolute_storage_path(value, path):
 		raise ConfigurationError(f"{name} must be an absolute path: {value}")
 	return path.expanduser()
+
+
+def trusted_attachment_roots(settings: "InventorySettings") -> tuple[Path, ...]:
+	"""Return local Hermes-owned attachment directories accepted by the tool."""
+	roots = [settings.hermes_images_dir]
+	if sys.platform == "win32":
+		appdata = os.environ.get("APPDATA", "").strip()
+		if appdata:
+			roots.append(Path(appdata) / "Hermes" / "composer-images")
+	elif sys.platform == "darwin":
+		roots.append(Path.home() / "Library" / "Application Support" / "Hermes" / "composer-images")
+	else:
+		roots.append(Path.home() / ".config" / "Hermes" / "composer-images")
+	return tuple(roots)
+
+
+def normalize_homebox_url(value: str) -> str:
+	"""Accept a plain URL or Hermes @url Markdown wrapper, never arbitrary text."""
+	if not isinstance(value, str):
+		raise ConfigurationError("HomeBox URL must be an HTTP or HTTPS URL")
+	text = value.strip()
+	match = re.fullmatch(r"@url:`?\[([^\]]+)\]\((https?://[^)]+)\)`?", text)
+	if match:
+		label, target = match.groups()
+		if label != target:
+			raise ConfigurationError("HomeBox URL link text and target must match")
+		text = target
+	parsed = urlparse(text)
+	if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+		raise ConfigurationError("HomeBox URL must be an HTTP or HTTPS URL")
+	return text.rstrip("/")
 
 
 def _non_negative_float(value: Any, default: float) -> float:
@@ -181,9 +220,10 @@ def get_settings() -> InventorySettings:
 def homebox_url(settings: InventorySettings | None = None) -> str:
 	"""Resolve the non-secret HomeBox URL: environment then plugin config."""
 	settings = settings or get_settings()
-	return environment_value("HOMEBOX_URL").strip().rstrip("/") or str(
-		_nested_value(_load_config_document(settings.hermes_home)[0], "homebox", "url", "")
-	).strip().rstrip("/")
+	configured = environment_value("HOMEBOX_URL") or _nested_value(
+		_load_config_document(settings.hermes_home)[0], "homebox", "url", ""
+	)
+	return normalize_homebox_url(configured) if configured else ""
 
 
 def homebox_api_key() -> str:
@@ -228,6 +268,14 @@ def write_storage_config(persistent_data_dir: Path | None) -> None:
 	_write_config_document(settings, payload)
 
 
+def storage_root_for_setup(value: str) -> Path:
+	"""Treat a setup storage value as a parent unless it is already an Inventory root."""
+	path = _configured_path(value, "storage.persistent_data_dir")
+	if path is None:
+		raise ConfigurationError("Storage path must not be empty")
+	return path if path.name.casefold().endswith("inventory") else path / "inventory"
+
+
 def write_homebox_url(url: str) -> None:
 	"""Atomically save the normal, non-secret HomeBox URL unchanged."""
 	if not isinstance(url, str) or not url.strip():
@@ -237,7 +285,7 @@ def write_homebox_url(url: str) -> None:
 	homebox = payload.setdefault("homebox", {})
 	if not isinstance(homebox, dict):
 		raise ConfigurationError("homebox must be an object in inventory-config.json")
-	homebox["url"] = url
+	homebox["url"] = normalize_homebox_url(url)
 	_write_config_document(settings, payload)
 
 
@@ -281,12 +329,17 @@ def write_homebox_api_key(value: str, settings: InventorySettings | None = None)
 		return
 	settings = settings or get_settings()
 	try:
-		from hermes_constants import set_environment_value
-		set_environment_value("HOMEBOX_API_KEY", value)
+		from hermes_cli.config import save_env_value
+		save_env_value("HOMEBOX_API_KEY", value)
 		return
 	except (ImportError, AttributeError, TypeError):
-		_write_dotenv_secret("HOMEBOX_API_KEY", value, settings)
-		os.environ["HOMEBOX_API_KEY"] = value
+		try:
+			from hermes_constants import set_environment_value
+			set_environment_value("HOMEBOX_API_KEY", value)
+			return
+		except (ImportError, AttributeError, TypeError):
+			_write_dotenv_secret("HOMEBOX_API_KEY", value, settings)
+			os.environ["HOMEBOX_API_KEY"] = value
 
 
 def storage_health(path: Path) -> tuple[bool, str]:

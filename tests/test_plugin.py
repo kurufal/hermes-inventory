@@ -102,6 +102,34 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertEqual(seen["staged_names"], ["explicit.png"])
 		mark_consumed.assert_not_called()
 
+	def test_windows_composer_images_are_trusted_only_when_explicit(self):
+		composer = self.root / "Roaming" / "Hermes" / "composer-images"
+		composer.mkdir(parents=True)
+		first = composer / "composer_2026-09-01_20-16-27-642_9b27f5.jpg"
+		second = composer / "composer_2026-09-01_20-16-27-691_575083.png"
+		first.write_bytes(b"first")
+		second.write_bytes(b"second")
+		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False):
+			result, seen, _ = self.run_ingest([str(first), str(second)])
+		self.assertIn('"created": true', result)
+		self.assertEqual(set(seen["staged_names"]), {first.name, second.name})
+
+	def test_arbitrary_appdata_path_is_rejected(self):
+		outside = self.root / "Roaming" / "other.jpg"
+		outside.parent.mkdir(parents=True)
+		outside.write_bytes(b"image")
+		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False):
+			result, _, _ = self.run_ingest([str(outside)])
+		self.assertIn("outside trusted Hermes attachment roots", result)
+
+	def test_unavailable_composer_path_explains_remote_backend_limit(self):
+		settings = SimpleNamespace(hermes_images_dir=self.root / "images", runtime_dir=self.root / "runtime")
+		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
+			self.plugin, "homebox_url", return_value="http://homebox",
+		), patch.object(self.plugin, "homebox_api_key", return_value="configured-key"):
+			result = self.plugin.inventory_ingest(r"C:\Users\Desktop\AppData\Roaming\Hermes\composer-images\composer_missing.jpg", "fake-llm")
+		self.assertIn("unavailable to this backend", result)
+
 	def test_explicit_paths_take_priority_over_pending_mode(self):
 		with patch.object(
 			self.plugin,
@@ -297,6 +325,9 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		with patch("inventory.cli.inventory_cli", return_value="ok") as cli:
 			self.assertEqual(registrations["cli"]["handler_fn"](namespace), "ok")
 		cli.assert_called_once_with(["setup", "--secrets"])
+		with patch.object(self.plugin, "inventory_ingest", return_value="handled") as handler:
+			self.assertEqual(registrations["tool"]["handler"]({"image_paths": ["C:/photo.jpg"]}), "handled")
+		handler.assert_called_once_with(["C:/photo.jpg"], "fake-llm", use_pending_upload=False)
 
 	def test_tool_description_contains_natural_language_routing_triggers(self):
 		registrations = {}

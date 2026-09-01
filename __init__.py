@@ -23,7 +23,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
 	sys.path.insert(0, _PLUGIN_DIR)
 
-from inventory.config import get_settings, homebox_api_key, homebox_url
+from inventory.config import get_settings, homebox_api_key, homebox_url, trusted_attachment_roots
 from inventory.media import is_supported_image
 from inventory.uploads import (
 	PendingUploadError,
@@ -76,6 +76,11 @@ def _normalize_image_paths(raw_paths, settings=None):
 		try:
 			path = path.resolve(strict=True)
 		except FileNotFoundError:
+			if "composer-images" in raw.casefold().replace("\\", "/"):
+				raise ValueError(
+					"Desktop composer attachment is unavailable to this backend. "
+					"Use a local Desktop backend or a recent backend upload batch."
+				)
 			raise ValueError(f"Attached image does not exist: {raw}")
 
 		if not path.is_file():
@@ -86,14 +91,9 @@ def _normalize_image_paths(raw_paths, settings=None):
 				f"Unsupported image type: {path.name}"
 			)
 
-		# Hermes-managed attachments live below HERMES_HOME/images.
-		# Keeping this restriction prevents arbitrary host-file ingestion
-		# through model-generated paths.
-		try:
-			path.relative_to(settings.hermes_images_dir.resolve())
-		except ValueError:
+		if path.is_symlink() or not any(_is_within(path, root) for root in trusted_attachment_roots(settings)):
 			raise ValueError(
-				f"Image path is outside HERMES_HOME and was refused: {path}"
+				f"Image path is outside trusted Hermes attachment roots and was refused: {path}"
 			)
 
 		if path not in resolved:
@@ -103,6 +103,14 @@ def _normalize_image_paths(raw_paths, settings=None):
 		raise ValueError("No usable attached images were supplied")
 
 	return resolved
+
+
+def _is_within(path, root):
+	try:
+		path.relative_to(Path(root).resolve(strict=True))
+		return True
+	except (FileNotFoundError, ValueError):
+		return False
 
 
 def _load_inventory_ingest():
