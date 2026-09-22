@@ -56,6 +56,10 @@ Treat these as direct inventory commands:
 - “record this item”
 - “add this to HomeBox”
 - “put this in HomeBox”
+
+## Reconciliation Commands
+
+`/inventory refresh` and `/inventory refresh --verbose` are read-only reconciliation previews. Use `/inventory refresh --resolve` only to apply deterministic local repairs after a verified backup. Ambiguous legacy retry groups remain blocked unless the user explicitly chooses a displayed candidate with `/inventory refresh --resolve <ambiguity-number> <inventory-id>`; inspect candidates first with `--verbose` or preview the choice with `--resolve --dry-run`. Never select a candidate on the user's behalf, modify HomeBox, or delete legacy evidence during reconciliation.
 - “add the thing I just uploaded”
 
 If “this”, “item”, “thing”, “image”, “photo”, “these images”, “these photos”,

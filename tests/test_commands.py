@@ -28,6 +28,15 @@ class InventoryCommandTests(unittest.TestCase):
 		self.assertIn("No changes were made.", dry_run)
 		self.assertEqual(scanner.call_count, 2)
 
+	def test_plain_refresh_is_preview_and_resolve_is_the_apply_route(self):
+		preview = {"canonical": {"valid_items": []}, "legacy": {"legacy_candidates": []}, "homebox": {"items": [], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True), patch("inventory.refresh.refresh", return_value=preview), patch("inventory.refresh.apply_refresh", return_value={"report": preview, "final_report": preview, "applied": [], "backup": None}) as apply:
+				self.assertIn("Mode: READ-ONLY PREVIEW", inventory_command("refresh"))
+				apply.assert_not_called()
+				self.assertIn("Mode: APPLY", inventory_command("refresh --resolve"))
+				apply.assert_called_once()
+
 	def test_refresh_apply_errors_are_not_formatted_as_reconciled(self):
 		report = {"canonical": {"valid_items": []}, "legacy": {"legacy_candidates": []}, "homebox": {"items": [], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
 		for result in ({"status": "ERROR", "applied": [], "skipped": [{"reason": "backup_verification_failed"}], "backup": {"path": "backup.zip"}}, {"status": "ERROR", "applied": [{"type": "link_homebox"}], "failed": {"action": {"type": "adopt_homebox"}, "error": "boom"}, "skipped": [{"reason": "not_attempted_after_failure"}], "backup": {"path": "backup.zip"}}):

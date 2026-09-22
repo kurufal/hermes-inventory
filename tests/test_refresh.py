@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from inventory.homebox import HomeBoxEnumerationError, list_all_entities
-from inventory.refresh import _apply_action, apply_refresh, build_plan, refresh
+from inventory.refresh import _apply_action, apply_refresh, apply_resolution, build_plan, build_resolution_action, refresh
 from inventory.storage import write_catalog
 
 
@@ -447,6 +447,25 @@ class RefreshTests(unittest.TestCase):
 		self.assertTrue(any(entry["kind"] == "ambiguous_legacy_retry_group" for entry in report["matches"]["ambiguous"]))
 		self.assertIn("inspect_ambiguous_legacy_group", report["proposed_actions"])
 		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] in {"migrate_legacy", "adopt_homebox"}])
+
+	def test_explicit_resolution_migrates_only_the_selected_ambiguous_candidate(self):
+		for inventory_id in ("INV-one", "INV-two"):
+			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+			metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+			originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+			(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
+		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in (b"one", b"two")]
+		entities = [entity("hb-martian", "000-009", [{"name": "Inventory Item ID", "value": "test-item-001"}, {"name": "Image SHA-256", "value": "; ".join(hashes)}])]
+		report = refresh(settings=self.settings, homebox_entities=entities)
+		action, _ = build_resolution_action(report, 1, "INV-two")
+		self.assertEqual((action["type"], action["inventory_id"], action["entity_id"]), ("migrate_legacy", "INV-two", "hb-martian"))
+		result = apply_resolution(1, "INV-two", settings=self.settings, homebox_entities=entities)
+		self.assertEqual([entry["inventory_id"] for entry in result["applied"]], ["INV-two"])
+		self.assertTrue((self.settings.items_dir / "INV-two" / "item.json").is_file())
+		self.assertTrue((self.root / "originals" / "INV-two" / "one.png").is_file())
+		self.assertTrue((self.root / "metadata" / "INV-one.json").is_file())
+		with self.assertRaisesRegex(ValueError, "not a candidate"):
+			build_resolution_action(report, 1, "INV-not-a-candidate")
 
 	def test_retry_group_uses_unique_matching_valid_homebox_inventory_id(self):
 		for inventory_id in ("INV-winner", "INV-other"):

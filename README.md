@@ -142,9 +142,11 @@ Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging 
 
 `/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory refresh`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
 
-`/inventory refresh --dry-run` is a read-only reconciliation preview. It compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records.
+`/inventory refresh` is a read-only reconciliation preview; `--dry-run` is an equivalent explicit preview alias. Add `--verbose` to show canonical, HomeBox-only, local-only, conflict, deterministic-plan, and ambiguous legacy-candidate detail. Refresh compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records.
 
-`/inventory refresh` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, normalize old system-owned `Type: ` tags, remove only provably stale tokenized orphan Asset ID reservations, and rebuild the local catalog. Tokenless legacy reservations, malformed reservations, incomplete transactions, and historical duplicate image evidence are reported but never automatically deleted. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
+`/inventory refresh --resolve` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, normalize old system-owned `Type: ` tags, remove only provably stale tokenized orphan Asset ID reservations, and rebuild the local catalog. Tokenless legacy reservations, malformed reservations, incomplete transactions, and historical duplicate image evidence are reported but never automatically deleted. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
+
+For an ambiguity, inspect `/inventory refresh --verbose`, preview a chosen legacy record with `/inventory refresh --resolve --dry-run <ambiguity-number> <inventory-id>`, then apply it with `/inventory refresh --resolve <ambiguity-number> <inventory-id>`. The chosen ID must be one of the displayed candidates and is revalidated against its metadata, original-image hashes, and HomeBox identity immediately before mutation. Explicit resolution writes only a new canonical local record; it never changes HomeBox or deletes legacy evidence.
 
 HomeBox adoption stores the existing HomeBox metadata locally but does not download attachments as immutable originals. Adopted schema-v3 records can therefore have no local images or vision result; local search remains canonical/local. Existing schema-v1 and schema-v2 photographed records remain readable.
 
@@ -185,7 +187,7 @@ Exact SHA-256 image preflight runs before vision. All-exact incoming evidence ca
 
 ## Backup and Recovery
 
-Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.4.0.
+Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.4.1.
 
 ## Advanced Configuration
 

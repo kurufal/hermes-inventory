@@ -343,10 +343,6 @@ def refresh(*, settings=None, homebox_entities=None):
 	asset_ids = _asset_report(local_assets, homebox_assets, reserved_assets, homebox_complete)
 	asset_ids["conflicting"] = sorted({str(value) for conflict in conflicts for value in (conflict.get("asset_id"), conflict.get("local_asset_id"), conflict.get("homebox_asset_id")) if value})
 	proposed_actions = []
-	if legacy["legacy_candidates"]:
-		proposed_actions.append("migrate_legacy_record")
-	if matches["homebox_only"]:
-		proposed_actions.append("adopt_homebox_item")
 	if matches["local_only"]:
 		proposed_actions.append("recover_local_only_item")
 	if matches["ambiguous"]:
@@ -407,6 +403,55 @@ def refresh(*, settings=None, homebox_entities=None):
 		elif relationship["classification"] == "stale_link":
 			conflicts.append({"type": "stale_legacy_homebox_link", "path": path, "entity_id": relationship["entity_id"]})
 	return {"mode": "read_only", "status": "WARN" if warnings or legacy["relationships"] else "PASS", "paths": {"persistent_data_dir": str(settings.persistent_data_dir), "runtime_dir": str(settings.runtime_dir)}, "canonical": canonical, "legacy": legacy, "homebox": {"complete": homebox_complete, "error": homebox_error, "items": homebox_items}, "asset_ids": asset_ids, "reservations": {"entries": reservations, "unmatched": unmatched_reservations}, "transactions": {"incomplete": transactions}, "matches": matches, "conflicts": conflicts, "proposed_actions": sorted(proposed_actions)}
+
+
+def ambiguity_groups(report):
+	"""Return user-selectable unresolved legacy groups in stable display order."""
+	items = {str(entity["entity_id"]): entity for entity in report["homebox"]["items"] if isinstance(entity, dict) and entity.get("entity_id")}
+	groups = []
+	for diagnostic in report["legacy"].get("unresolved_retry_groups", []):
+		if len(diagnostic.get("entity_ids", [])) != 1:
+			continue
+		entity = items.get(str(diagnostic["entity_ids"][0]))
+		if entity:
+			groups.append({**diagnostic, "entity": entity})
+	return sorted(groups, key=lambda group: (str(group["entity"].get("asset_id") or ""), str(group["entity"].get("entity_id") or "")))
+
+
+def build_resolution_action(report, ambiguity_number, inventory_id):
+	"""Build one human-selected migrate_legacy action without relaxing validation."""
+	if not is_valid_inventory_id(inventory_id):
+		raise ValueError("Invalid Inventory ID")
+	groups = ambiguity_groups(report)
+	if ambiguity_number < 1 or ambiguity_number > len(groups):
+		raise ValueError(f"Ambiguity #{ambiguity_number} does not exist in the current refresh state")
+	group = groups[ambiguity_number - 1]
+	legacy = next((entry for entry in report["legacy"]["legacy_candidates"] if (entry.get("item_id") or entry.get("inventory_id")) == inventory_id and entry["path"] in group["paths"]), None)
+	if legacy is None:
+		raise ValueError(f"Selected Inventory ID is not a candidate for ambiguity #{ambiguity_number}")
+	metadata_path = Path(legacy["path"])
+	if metadata_path.parent.name != "metadata":
+		raise ValueError("Selected legacy metadata is not in the expected metadata directory")
+	source = metadata_path.parent.parent / "originals" / inventory_id
+	if not source.is_dir():
+		raise ValueError("Selected legacy originals directory is missing")
+	images = [(path.name, _path_digest(path)) for path in sorted(source.iterdir()) if path.is_file() and is_supported_image(path)]
+	expected = [(entry["filename"], entry["sha256"]) for entry in legacy.get("hashes", []) if isinstance(entry, dict) and entry.get("filename") and entry.get("sha256")]
+	if not images or images != expected:
+		raise ValueError("Selected legacy source images no longer match refresh evidence")
+	entity = group["entity"]
+	asset_id = str(entity.get("asset_id") or "")
+	if not _ASSET_RE.fullmatch(asset_id):
+		raise ValueError("Matched HomeBox Asset ID is invalid")
+	if any(item["inventory_id"] == inventory_id for item in report["canonical"]["valid_items"]):
+		raise ValueError("Canonical destination already exists")
+	if any(item["asset_id"] == asset_id for item in report["canonical"]["valid_items"]):
+		raise ValueError("Matched HomeBox Asset ID is already used locally")
+	if set(digest for _, digest in images) != image_sha256_values(entity):
+		raise ValueError("Selected legacy image evidence does not fully match HomeBox")
+	action = {"type": "migrate_legacy", "metadata_path": str(metadata_path), "source_directory": str(source), "inventory_id": inventory_id, "asset_id": asset_id, "entity_id": str(entity["entity_id"]), "explicit_resolution": True}
+	action["precondition"] = _action_precondition(action, report)
+	return action, group
 
 
 def _adoption_inventory_id(entity_id):
@@ -708,3 +753,30 @@ def apply_refresh(*, settings=None, homebox_entities=None):
 	write_catalog(settings)
 	final = refresh(settings=settings, homebox_entities=homebox_entities)
 	return {"mode": "apply", "status": final["status"], "backup": backup, "backup_verification": verification, "applied": applied, "failed": failed, "skipped": plan["skipped"], "report": final, "final_report": final}
+
+
+def apply_resolution(ambiguity_number, inventory_id, *, settings=None, homebox_entities=None):
+	"""Apply exactly one user-selected ambiguous legacy migration after fresh validation."""
+	settings = settings or get_settings()
+	report = refresh(settings=settings, homebox_entities=homebox_entities)
+	try:
+		action, group = build_resolution_action(report, ambiguity_number, inventory_id)
+	except ValueError as exc:
+		return {"mode": "resolve", "status": "ERROR", "backup": None, "applied": [], "failed": {"error": str(exc)}, "report": report, "final_report": report}
+	from inventory.backup import create_backup, verify_backup
+	backup = create_backup(settings=settings)
+	verification = verify_backup(Path(backup["path"]))
+	if verification.get("status") != "PASS":
+		return {"mode": "resolve", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": [], "skipped": [{"reason": "backup_verification_failed"}], "report": report, "final_report": report}
+	current = refresh(settings=settings, homebox_entities=homebox_entities)
+	try:
+		current_action, _ = build_resolution_action(current, ambiguity_number, inventory_id)
+		if current_action["precondition"] != action["precondition"]:
+			raise RuntimeError("Resolution state changed during refresh")
+		_apply_action(current_action, current, settings, live_homebox=homebox_entities is None)
+		write_catalog(settings)
+		final = refresh(settings=settings, homebox_entities=homebox_entities)
+		return {"mode": "resolve", "status": final["status"], "backup": backup, "backup_verification": verification, "applied": [current_action], "skipped": [], "report": final, "final_report": final, "group": group}
+	except Exception as exc:
+		final = refresh(settings=settings, homebox_entities=homebox_entities)
+		return {"mode": "resolve", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": [], "failed": {"action": action, "error": f"{type(exc).__name__}: {exc}"}, "skipped": [], "report": final, "final_report": final, "group": group}

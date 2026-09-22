@@ -16,7 +16,7 @@ def _help(topic=""):
 	commands = {
 		"": "Commands: setup, status, doctor, refresh, storage, uploads, homebox, backup, recover, version, help",
 		"setup": "Usage: /inventory setup [storage <absolute path>|storage default|homebox <url>|secrets|test|help]",
-		"refresh": "Usage: /inventory refresh [--dry-run]",
+		"refresh": "Usage: /inventory refresh [--dry-run] [--verbose] [--resolve [<ambiguity-number> <inventory-id>] ]",
 		"storage": "Usage: /inventory storage [show|test|set <absolute path>|reset|help]",
 	}
 	return commands.get(topic, commands[""])
@@ -74,11 +74,31 @@ def _status(settings):
 	return "\n".join(lines)
 
 
-def _format_refresh(report, *, apply_result=None):
+def _format_ambiguities(report, *, verbose=False):
+	from inventory.refresh import ambiguity_groups
+	groups = ambiguity_groups(report)
+	if not groups:
+		return []
+	lines = ["", "Ambiguous:"]
+	for number, group in enumerate(groups, start=1):
+		entity = group["entity"]
+		lines.extend([f"#{number} {entity.get('name') or 'Unnamed item'} [{entity.get('asset_id') or 'no Asset ID'}]", f"   {group['reason']}"])
+		if verbose:
+			lines.extend([f"   Entity ID: {entity['entity_id']}", "   Shared exact image evidence:", *[f"   {digest}" for digest in group.get("shared_hashes", [])], "   Candidates:"])
+			legacy = {entry["path"]: entry for entry in report["legacy"]["legacy_candidates"]}
+			for path in group["paths"]:
+				candidate = legacy.get(path, {})
+				inventory_id = candidate.get("item_id") or candidate.get("inventory_id") or "unknown"
+				lines.extend([f"   - {inventory_id}", f"     Metadata: {path}", f"     Originals: {Path(path).parent.parent / 'originals' / str(inventory_id)}", f"     Image count: {len(candidate.get('hashes', []))}"])
+			lines.extend(["   Automatic resolution: BLOCKED", f"   Preview: /inventory refresh --resolve --dry-run {number} <inventory-id>"])
+	return lines
+
+
+def _format_refresh(report, *, apply_result=None, verbose=False, resolution_preview=False, plan=None, resolution=None):
 	matches = report["matches"]
-	mode = "READ-ONLY PREVIEW" if apply_result is None else "APPLY"
+	mode = "RESOLUTION PREVIEW" if resolution_preview else ("READ-ONLY PREVIEW" if apply_result is None else "APPLY")
 	lines = ["Hermes Inventory Refresh", f"Mode: {mode}"]
-	if apply_result is None:
+	if apply_result is None or resolution_preview:
 		lines.append("No changes were made.")
 	else:
 		status = apply_result.get("status", "ERROR")
@@ -101,10 +121,29 @@ def _format_refresh(report, *, apply_result=None):
 		if failed and any(entry.get("reason") == "not_attempted_after_failure" for entry in skipped):
 			lines.append("Remaining actions were not attempted.")
 	lines.extend(["", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report.get('asset_ids', {}).get('conflicting', []))}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"])
+	lines.extend(_format_ambiguities(report, verbose=verbose))
+	if matches["ambiguous"] and not verbose:
+		lines.extend(["", "Run:", "/inventory refresh --verbose"])
+	if verbose:
+		lines.extend(["", "Canonical:", *[f"- {entry['inventory_id']} [{entry['asset_id']}]" for entry in report["canonical"]["valid_items"]], "HomeBox-only:", *[f"- {entry.get('name') or 'Unnamed item'} [{entry.get('asset_id') or 'no Asset ID'}]" for entry in matches["homebox_only"]], "Local-only:", *[f"- {entry['inventory_id']} [{entry['asset_id']}]" for entry in matches["local_only"]], "Conflicts:", *[f"- {entry['type']}" for entry in report["conflicts"]]])
+		if plan is not None:
+			lines.extend(["Deterministic plan:", *[f"- {action['type']}" for action in plan["actions"]]])
+	if resolution is not None:
+		action, group = resolution
+		lines.extend(["", f"Ambiguous match #{group['display_number']}: {group['entity'].get('name') or 'Unnamed item'}", f"Selected legacy record: {action['inventory_id']}", f"Metadata: {action['metadata_path']}", f"Originals: {action['source_directory']}", "Validation: PASS", "Planned action: migrate_legacy", "HomeBox mutation: NONE", "Legacy source deletion: NONE", "Backup required on apply: YES", "", "To apply:", f"/inventory refresh --resolve {group['display_number']} {action['inventory_id']}"])
 	if not report["homebox"]["complete"]:
 		lines.append("[WARN] HomeBox enumeration incomplete; no globally safe next Asset ID is reported.")
-	if report["proposed_actions"]:
-		lines.extend(["", "Suggested future actions:", *[f"- {action}" for action in report["proposed_actions"]]])
+	if plan is not None:
+		suggestions = []
+		if any(action["type"] == "adopt_homebox" for action in plan["actions"]): suggestions.append("adopt_homebox_item")
+		if any(action["type"] == "migrate_legacy" for action in plan["actions"]): suggestions.append("migrate_legacy_record")
+		if _format_ambiguities(report):
+			suggestions.extend(["inspect_ambiguous_legacy_group", "resolve_ambiguous_match"])
+		if report["transactions"]["incomplete"]: suggestions.append("inspect_incomplete_transaction")
+		if suggestions:
+			lines.extend(["", "Suggested next actions:", *[f"- {action}" for action in suggestions]])
+	elif report.get("proposed_actions"):
+		lines.extend(["", "Suggested next actions:", *[f"- {action}" for action in report["proposed_actions"]]])
 	return "\n".join(lines)
 
 
@@ -207,14 +246,44 @@ def inventory_command(raw_args="", **kwargs):
 	if command == "status":
 		return _status(settings)
 	if command == "refresh":
-		operation = parts[1] if len(parts) > 1 else ""
-		if operation and operation != "--dry-run":
+		arguments = ([parts[1]] if len(parts) > 1 else []) + (parts[2].split() if len(parts) > 2 else [])
+		flags = {argument for argument in arguments if argument.startswith("--")}
+		values = [argument for argument in arguments if not argument.startswith("--")]
+		if flags - {"--dry-run", "--verbose", "--resolve"}:
 			return _help("refresh")
-		from inventory.refresh import apply_refresh, refresh
-		if operation == "--dry-run":
-			return _format_refresh(refresh(settings=settings))
-		result = apply_refresh(settings=settings)
-		lines = _format_refresh(result.get("final_report", result["report"]), apply_result=result)
+		resolve, dry_run, verbose = "--resolve" in flags, "--dry-run" in flags, "--verbose" in flags
+		if not resolve and values:
+			return _help("refresh")
+		if resolve and values and len(values) != 2:
+			return "Usage: /inventory refresh --resolve [--dry-run] <ambiguity-number> <inventory-id>"
+		from inventory.refresh import apply_refresh, apply_resolution, build_plan, build_resolution_action, refresh
+		report = refresh(settings=settings)
+		try:
+			plan = build_plan(report)
+		except KeyError:
+			plan = {"actions": []}
+		if not resolve:
+			return _format_refresh(report, verbose=verbose, plan=plan)
+		if values:
+			try:
+				ambiguity_number = int(values[0])
+				action, group = build_resolution_action(report, ambiguity_number, values[1])
+				group = {**group, "display_number": ambiguity_number}
+			except ValueError as exc:
+				return str(exc)
+			if dry_run:
+				return _format_refresh(report, verbose=verbose, resolution_preview=True, plan=plan, resolution=(action, group))
+			result = apply_resolution(ambiguity_number, values[1], settings=settings)
+		else:
+			if dry_run:
+				return _format_refresh(report, verbose=verbose, resolution_preview=True, plan=plan)
+			result = apply_refresh(settings=settings)
+		final_report = result.get("final_report", result["report"])
+		try:
+			final_plan = build_plan(final_report)
+		except KeyError:
+			final_plan = plan
+		lines = _format_refresh(final_report, apply_result=result, verbose=verbose, plan=final_plan)
 		if result.get("backup"):
 			lines += f"\n\nBackup:\n{result['backup']['path']}\nBackup verification: {result.get('backup_verification', {}).get('status', 'not_run')}"
 		return lines

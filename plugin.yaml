@@ -1,5 +1,5 @@
 name: hermes-inventory
-version: "0.4.0"
+version: "0.4.1"
 description: "Manage durable physical Inventory records: catalog items, search canonical data, update records, and synchronize with HomeBox."
 manifest_version: 1
 provides_tools: [inventory_ingest, inventory_search, inventory_update]
