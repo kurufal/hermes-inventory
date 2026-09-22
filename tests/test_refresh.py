@@ -377,6 +377,50 @@ class RefreshTests(unittest.TestCase):
 		self.assertEqual([(action["inventory_id"], action["entity_id"]) for action in migrations], [("INV-HIST", "hb-1")])
 		self.assertFalse([action for action in plan["actions"] if action["type"] == "adopt_homebox"])
 
+	def test_strong_legacy_match_claims_homebox_before_adoption_and_migrates_once(self):
+		inventory_id, asset_id = "INV-20260815-183508-a9f6ceb2", "000-010"
+		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True)
+		metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": asset_id, "result": {"object_type": {"value": "Game"}, "product_or_title": {"value": "Forbidden Desert"}}}), encoding="utf-8")
+		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+		(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
+		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in (b"one", b"two")]
+		fields = [{"name": "Inventory Item ID", "value": inventory_id}, {"name": "Image SHA-256", "value": "; ".join(hashes)}]
+		entities = [entity("hb-game", asset_id, fields, "Forbidden Desert")]
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=entities))
+		self.assertEqual([(action["type"], action["inventory_id"], action.get("entity_id"), action.get("asset_id")) for action in plan["actions"]], [("migrate_legacy", inventory_id, "hb-game", asset_id)])
+		result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual([action["type"] for action in result["applied"]], ["migrate_legacy"])
+		manifest = json.loads((self.settings.items_dir / inventory_id / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(manifest["status"], "synced")
+		self.assertEqual(manifest["homebox"]["entity_id"], "hb-game")
+		self.assertEqual({image["sha256"] for image in manifest["images"]}, set(hashes))
+		self.assertTrue((originals / "one.png").is_file())
+		self.assertEqual(apply_refresh(settings=self.settings, homebox_entities=entities)["applied"], [])
+
+	def test_ambiguous_legacy_retries_are_visible_and_withhold_homebox_adoption(self):
+		for inventory_id in ("INV-one", "INV-two"):
+			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+			metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+			originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+			(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
+		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in (b"one", b"two")]
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-martian", "000-009", [{"name": "Inventory Item ID", "value": "test-item-001"}, {"name": "Image SHA-256", "value": "; ".join(hashes)}])])
+		self.assertEqual(report["legacy"]["unresolved_retry_groups"][0]["entity_ids"], ["hb-martian"])
+		self.assertTrue(any(entry["kind"] == "ambiguous_legacy_retry_group" for entry in report["matches"]["ambiguous"]))
+		self.assertIn("inspect_ambiguous_legacy_group", report["proposed_actions"])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] in {"migrate_legacy", "adopt_homebox"}])
+
+	def test_retry_group_uses_unique_matching_valid_homebox_inventory_id(self):
+		for inventory_id in ("INV-winner", "INV-other"):
+			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+			metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+			originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+			(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
+		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in (b"one", b"two")]
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-martian", "000-009", [{"name": "Inventory Item ID", "value": "INV-winner"}, {"name": "Image SHA-256", "value": "; ".join(hashes)}])])
+		plan = build_plan(report)
+		self.assertEqual([(action["type"], action["inventory_id"], action["entity_id"]) for action in plan["actions"]], [("migrate_legacy", "INV-winner", "hb-martian")])
+
 	def test_apply_coalesces_upgrade_and_system_type_tag_normalization_once(self):
 		payload = self.write_item()
 		payload["tags"] = [{"name": "Type: Book", "source": "system"}, {"name": "Keep", "source": "user"}]

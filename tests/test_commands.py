@@ -37,10 +37,12 @@ class InventoryCommandTests(unittest.TestCase):
 		self.assertIn("Remaining actions were not attempted.", _format_refresh(report, apply_result={"status": "ERROR", "applied": [{"type": "link_homebox"}], "failed": {"action": {"type": "adopt_homebox"}, "error": "boom"}, "skipped": [{"reason": "not_attempted_after_failure"}]}))
 
 	def test_dry_run_includes_reconciliation_counts_and_asset_conflict_count(self):
-		report = {"canonical": {"valid_items": [1]}, "legacy": {"legacy_candidates": [1]}, "homebox": {"items": [1], "complete": True}, "matches": {"homebox_only": [1], "local_only": [1], "ambiguous": [1]}, "asset_ids": {"conflicting": ["000-001"]}, "conflicts": [{"type": "strong_identity_conflict"}], "reservations": {"unmatched": [1]}, "transactions": {"incomplete": [1]}, "proposed_actions": []}
+		report = {"canonical": {"valid_items": [1]}, "legacy": {"legacy_candidates": [1]}, "homebox": {"items": [1], "complete": True}, "matches": {"homebox_only": [1], "local_only": [1], "ambiguous": [1]}, "asset_ids": {"conflicting": ["000-001"]}, "conflicts": [{"type": "strong_identity_conflict"}], "reservations": {"unmatched": [1]}, "transactions": {"incomplete": [1]}, "proposed_actions": ["inspect_ambiguous_legacy_group"]}
 		output = _format_refresh(report)
 		self.assertIn("Canonical items: 1", output)
 		self.assertIn("Asset ID conflicts: 1", output)
+		self.assertIn("Ambiguous matches: 1", output)
+		self.assertIn("inspect_ambiguous_legacy_group", output)
 
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:

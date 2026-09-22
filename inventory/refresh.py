@@ -95,7 +95,7 @@ def _legacy_scan(root, canonical_paths):
 			payload = _read_json(path)
 			entry = {"path": str(path), "schema": payload.get("schema") if payload else None, "schema_version": payload.get("schema_version") if payload else None}
 			if payload:
-				entry.update({key: payload.get(key) for key in ("inventory_id", "asset_id", "homebox_entity_id", "entity_id", "identifiers", "source_images", "source_directory") if payload.get(key) is not None})
+				entry.update({key: payload.get(key) for key in ("item_id", "inventory_id", "asset_id", "homebox_entity_id", "entity_id", "identifiers", "source_images", "source_directory") if payload.get(key) is not None})
 				inventory_id = str(payload.get("item_id") or payload.get("inventory_id") or "").strip()
 				originals = root / "originals" / inventory_id if is_valid_inventory_id(inventory_id) else None
 				entry["hashes"] = [{"filename": image.name, "sha256": sha256_file(image)} for image in sorted(originals.iterdir()) if image.is_file() and is_supported_image(image)] if originals and originals.is_dir() else []
@@ -358,10 +358,35 @@ def refresh(*, settings=None, homebox_entities=None):
 	warnings = sum(bool(value) for value in (canonical["corrupt_manifests"], canonical["unsupported_schema_versions"], canonical["duplicate_inventory_ids"], canonical["duplicate_asset_ids"], canonical["duplicate_image_hashes"], canonical["missing_images"], canonical["checksum_mismatches"], canonical["unsafe_image_paths"], legacy["legacy_candidates"], legacy["unknown_format"], transactions, conflicts, matches["ambiguous"], matches["homebox_only"], matches["local_only"], unmatched_reservations, not homebox_complete))
 	homebox_items = homebox_entities
 	legacy["relationships"] = _legacy_relationships(legacy["legacy_candidates"], homebox_items) if homebox_complete else {}
+	legacy_by_path = {entry["path"]: entry for entry in legacy["legacy_candidates"]}
+	legacy["unresolved_retry_groups"] = []
 	for group in legacy["retry_groups"]:
-		hash_sets = [set(values) for values in group["hash_sets"].values()]
-		if sum(not any(candidate < other for other in hash_sets) for candidate in hash_sets) > 1:
-			conflicts.append({"type": "ambiguous_legacy_retry_group", "paths": group["paths"]})
+		hash_sets = {path: set(values) for path, values in group["hash_sets"].items()}
+		maximal_paths = [path for path, hashes in hash_sets.items() if not any(hashes < other for other in hash_sets.values())]
+		if len(maximal_paths) == 1:
+			group["selected_path"] = maximal_paths[0]
+			continue
+		identity_winners = []
+		for path in maximal_paths:
+			relationship = legacy["relationships"].get(path, {})
+			entity = next((entry for entry in homebox_items if str(entry["entity_id"]) == str(relationship.get("entity_id"))), None)
+			legacy_id = str(legacy_by_path[path].get("inventory_id") or "")
+			if entity and is_valid_inventory_id(legacy_id) and legacy_id in _homebox_inventory_ids(entity):
+				identity_winners.append(path)
+		if len(identity_winners) == 1:
+			group["selected_path"] = identity_winners[0]
+			continue
+		if len(maximal_paths) > 1:
+			entity_ids = sorted({str(legacy["relationships"].get(path, {}).get("entity_id")) for path in group["paths"] if legacy["relationships"].get(path, {}).get("classification") == "matched"})
+			assets = sorted({str(legacy_by_path[path].get("asset_id")) for path in group["paths"] if legacy_by_path.get(path, {}).get("asset_id")})
+			shared_hashes = sorted(set.intersection(*hash_sets.values())) if hash_sets else []
+			diagnostic = {"type": "ambiguous_legacy_retry_group", "entity_ids": entity_ids, "asset_ids": assets, "paths": group["paths"], "inventory_ids": [legacy_by_path[path].get("item_id") or legacy_by_path[path].get("inventory_id") for path in group["paths"]], "shared_hashes": shared_hashes, "reason": "multiple equally complete legacy image sets"}
+			legacy["unresolved_retry_groups"].append(diagnostic)
+			conflicts.append(diagnostic)
+			for entity_id in entity_ids:
+				matches["ambiguous"].append({"inventory_id": None, "kind": "ambiguous_legacy_retry_group", "entity_ids": [entity_id], "legacy_paths": group["paths"]})
+	if legacy["unresolved_retry_groups"]:
+		proposed_actions.append("inspect_ambiguous_legacy_group")
 	for path, relationship in legacy["relationships"].items():
 		if relationship["classification"] in {"conflict", "asset_conflict"}:
 			conflicts.append({"type": "legacy_homebox_identity_conflict", "path": path, "entity_ids": relationship["entity_ids"]})
@@ -439,16 +464,15 @@ def build_plan(report):
 	legacy_by_path = {legacy["path"]: legacy for legacy in report["legacy"]["legacy_candidates"]}
 	selected_legacy_paths = set(legacy_by_path)
 	for group in report["legacy"].get("retry_groups", []):
-		hash_sets = {path: set(values) for path, values in group["hash_sets"].items()}
-		maximal = [path for path, hashes in hash_sets.items() if not any(hashes < other for other in hash_sets.values())]
-		if len(maximal) == 1:
-			selected_legacy_paths.difference_update(set(group["paths"]) - {maximal[0]})
+		if group.get("selected_path"):
+			selected_legacy_paths.difference_update(set(group["paths"]) - {group["selected_path"]})
 		else:
 			selected_legacy_paths.difference_update(group["paths"])
 			for path in group["paths"]:
 				relationship = report["legacy"].get("relationships", {}).get(path, {})
 				if relationship.get("entity_id"):
 					blocked_entities.add(str(relationship["entity_id"]))
+	claimed_homebox_entities = set(entity_ids)
 	for item in report["canonical"]["valid_items"]:
 		if item["manifest"].get("schema_version") != SCHEMA_VERSION:
 			add_manifest_update(item, "upgrade_schema")
@@ -472,6 +496,8 @@ def build_plan(report):
 		if relationship["classification"] in {"conflict", "asset_conflict"} or inventory_id in blocked_inventory_ids:
 			continue
 		linked_entity_id = relationship.get("entity_id") if relationship["classification"] == "matched" else None
+		if linked_entity_id and linked_entity_id in claimed_homebox_entities:
+			continue
 		if not linked_entity_id and asset_id in report["asset_ids"]["used_in_homebox"]:
 			continue
 		if linked_entity_id and (linked_entity_id in blocked_entities or asset_id in blocked_assets):
@@ -486,13 +512,14 @@ def build_plan(report):
 			canonical_ids.add(target_inventory_id)
 			if linked_entity_id:
 				entity_ids.add(str(linked_entity_id))
+				claimed_homebox_entities.add(str(linked_entity_id))
 	for entry in report["matches"]["represented_in_both"]:
 		item = next(item for item in report["canonical"]["valid_items"] if item["inventory_id"] == entry["inventory_id"])
 		if not item.get("homebox_entity_id") and str(entry["entity_id"]) not in blocked_entities and item["inventory_id"] not in blocked_inventory_ids and item["asset_id"] not in blocked_assets:
 			add_manifest_update(item, "link_homebox", entry["entity_id"])
 	for entity in report["homebox"]["items"]:
 		entity_id = str(entity.get("entity_id"))
-		if entity_id in entity_ids or entity_id in blocked_entities:
+		if entity_id in claimed_homebox_entities or entity_id in blocked_entities:
 			continue
 		if str(entity.get("asset_id")) in blocked_assets:
 			continue
