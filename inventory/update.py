@@ -6,7 +6,7 @@ from pathlib import Path
 
 from inventory.ingest import run_vision
 from inventory.normalize import normalize_record, normalize_type
-from inventory.storage import _ASSET_RE, allocate_asset_id, atomic_json_write, canonicalize_images, managed_type_tag, migrate_manifest, write_catalog, write_manifest
+from inventory.storage import _ASSET_RE, allocate_asset_id, atomic_json_write, canonicalize_images, migrate_manifest, write_catalog, write_manifest
 
 
 def _now():
@@ -121,9 +121,7 @@ def _apply_changes(manifest, changes):
 
 
 def _reconcile_managed_type_tag(manifest):
-	managed = managed_type_tag(manifest.get("item", {}).get("category"))
-	user_tags = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
-	manifest["tags"] = [managed, *user_tags]
+	manifest["tags"] = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
 	homebox = manifest.setdefault("homebox", {})
 	current_names = [str(manifest.get("item", {}).get("category", "")), *[str(tag.get("name", "")) for tag in manifest["tags"] if isinstance(tag, dict) and tag.get("source") == "user"]]
 	homebox["managed_tag_names"] = list(dict.fromkeys([*homebox.get("managed_tag_names", []), *current_names]))
@@ -143,17 +141,18 @@ def _asset_id_available(asset_id, manifest, settings):
 				raise ValueError(f"Asset ID is already in use in HomeBox: {asset_id}")
 	except ValueError:
 		raise
-	except Exception:
-		pass
+	except Exception as exc:
+		if manifest.get("homebox", {}).get("entity_id"):
+			raise RuntimeError("Cannot verify that this Asset ID is globally available because HomeBox could not be completely enumerated.") from exc
 
 
 def _reconcile_image_names(manifest, images):
 	if not images.is_dir():
 		raise RuntimeError("Canonical Inventory images directory is missing")
 	record = _record(manifest, images)
-	canonicalize_images(record, images)
-	by_name = {Path(image.get("relative_path", "")).name: image for image in manifest.get("images", [])}
-	manifest["images"] = [{**by_name.get(source, {}), "relative_path": f"images/{source}", "canonical_filename": source, "original_filename": record["source_filenames"].get(source, source), "source_filename": record["source_filenames"].get(source, source), "role": next((role.get("inferred_role", "other") for role in record["image_roles"] if role.get("filename") == source), "other"), "sha256": next((entry.get("sha256", "") for entry in record["image_hashes"] if entry.get("filename") == source), "")} for source in record["source_images"]]
+	old_images = {Path(image.get("relative_path", "")).name: dict(image) for image in manifest.get("images", []) if isinstance(image, dict)}
+	name_map = canonicalize_images(record, images)
+	manifest["images"] = [{**old_images.get(next((old for old, new in name_map.items() if new == source), source), {}), "relative_path": f"images/{source}", "canonical_filename": source, "original_filename": record["source_filenames"].get(source, source), "source_filename": record["source_filenames"].get(source, source), "role": next((role.get("inferred_role", "other") for role in record["image_roles"] if role.get("filename") == source), "other"), "sha256": next((entry.get("sha256", "") for entry in record["image_hashes"] if entry.get("filename") == source), "")} for source in record["source_images"]]
 
 
 def update_item(target, operation, changes=None, vision_client=None, *, settings):
@@ -223,8 +222,18 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	from inventory.homebox import complete_entity
 	entity_id = manifest.get("homebox", {}).get("entity_id")
 	if entity_id:
+		resume_attachments = operation == "resync" and manifest.get("status") == "pending_homebox_sync" and bool(manifest.get("images"))
+		attachment_sync = dict(manifest.get("homebox", {}).get("attachment_sync", {}))
+		def persist_attachment(attachment):
+			digest = attachment.get("sha256")
+			if digest:
+				attachment_sync[digest] = attachment
+			manifest.setdefault("homebox", {})["attachment_sync"] = attachment_sync
+			manifest["status"] = "pending_homebox_sync"
+			write_manifest(manifest, settings=settings)
 		try:
-			completed = complete_entity(entity_id, record, image_directory=images, upload_attachments=False)
+			completed = complete_entity(entity_id, record, image_directory=images, upload_attachments=resume_attachments, attachment_sync=attachment_sync, on_attachment_uploaded=persist_attachment)
+			manifest.setdefault("homebox", {})["attachment_sync"] = attachment_sync
 			manifest["homebox"]["attachments"] = manifest["homebox"].get("attachments", completed.get("attachments", []))
 			manifest["status"] = "synced"; manifest["error"] = None
 		except Exception as exc:

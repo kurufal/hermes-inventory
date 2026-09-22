@@ -107,7 +107,8 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(manifest["identifiers"]["serial_number"], ["NEW"])
 		self.assertEqual(manifest["item"]["condition"][0]["observation"], "scratched")
 		self.assertIn({"name": "Cyberpunk", "source": "user"}, manifest["tags"])
-		self.assertIn({"name": "Type: Book", "source": "system"}, manifest["tags"])
+		self.assertEqual(manifest["item"]["category"], "Book")
+		self.assertNotIn({"name": "Type: Book", "source": "system"}, manifest["tags"])
 
 	def test_legacy_manifest_can_resync_without_implicit_asset_id(self):
 		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload.pop("asset_id"); payload.pop("field_sources"); payload.pop("history"); payload["schema_version"] = 1

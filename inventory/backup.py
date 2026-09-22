@@ -13,7 +13,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 
 from inventory.config import get_settings, storage_health
-from inventory.constants import BACKUP_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION
+from inventory.constants import BACKUP_SCHEMA, BACKUP_SCHEMA_VERSION, PLUGIN_VERSION, SUPPORTED_BACKUP_SCHEMA_VERSIONS
 from inventory.hashing import sha256_file
 
 
@@ -80,7 +80,7 @@ def _create_backup(settings=None) -> dict:
 				arcname = str(arcname).replace("\\", "/")
 				archive.write(source, arcname)
 				checksums[arcname] = sha256_file(source)
-			manifest = {"schema": BACKUP_SCHEMA, "schema_version": SCHEMA_VERSION, "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "plugin_version": PLUGIN_VERSION, "source_inventory_path": str(settings.persistent_data_dir), "inventory_item_count": sum(1 for _ in settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else 0, "image_count": sum(1 for path in settings.items_dir.rglob("*") if path.is_file() and path.parent.name == "images") if settings.items_dir.exists() else 0, "included_sections": ["inventory"], "files": checksums, "native_homebox_export": {"included": False, "status": "unavailable", "reason": "No verified public HomeBox export API is configured."}}
+			manifest = {"schema": BACKUP_SCHEMA, "schema_version": BACKUP_SCHEMA_VERSION, "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "plugin_version": PLUGIN_VERSION, "source_inventory_path": str(settings.persistent_data_dir), "inventory_item_count": sum(1 for _ in settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else 0, "image_count": sum(1 for path in settings.items_dir.rglob("*") if path.is_file() and path.parent.name == "images") if settings.items_dir.exists() else 0, "included_sections": ["inventory"], "files": checksums, "native_homebox_export": {"included": False, "status": "unavailable", "reason": "No verified public HomeBox export API is configured."}}
 			archive.writestr("backup-manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
 		os.replace(temporary_name, final_path)
 		archive_hash = sha256_file(final_path)
@@ -104,7 +104,7 @@ def verify_backup(path: Path, settings=None) -> dict:
 			if "backup-manifest.json" not in names:
 				return {"status": "FAIL", "error": "Archive has no backup manifest."}
 			manifest = json.loads(archive.read("backup-manifest.json"))
-			if manifest.get("schema") != BACKUP_SCHEMA or manifest.get("schema_version") != SCHEMA_VERSION:
+			if manifest.get("schema") != BACKUP_SCHEMA or manifest.get("schema_version") not in SUPPORTED_BACKUP_SCHEMA_VERSIONS:
 				return {"status": "FAIL", "error": "Unsupported backup manifest schema."}
 			failures = []
 			for name, digest in manifest.get("files", {}).items():

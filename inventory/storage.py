@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from inventory.config import get_settings
-from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS
+from inventory.constants import CATALOG_SCHEMA, CATALOG_SCHEMA_VERSION, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS
 from inventory.media import mime_type
 from inventory.hashing import sha256_file
 
@@ -107,17 +107,13 @@ def normalize_image_role(value) -> str:
 	return _ROLE_ALIASES.get(text, _slug(text, 30))
 
 
-def managed_type_tag(category) -> dict[str, str]:
-	return {"name": f"Type: {category or 'Other'}", "source": "system"}
-
-
 def canonical_image_name(asset_id: str, name: str, role: str, extension: str, index: int = 1) -> str:
 	role = _slug(role, 30)
 	suffix = f"_{index:02d}" if index > 1 else ""
 	return f"{asset_id}_{_slug(name, 40)}_{role}{suffix}{extension.lower()}"
 
 
-def canonicalize_images(record: dict[str, Any], image_dir: Path) -> None:
+def canonicalize_images(record: dict[str, Any], image_dir: Path) -> dict[str, str]:
 	"""Rename only files in an Inventory transaction/canonical images directory."""
 	asset_id = record.get("asset_id")
 	if not _ASSET_RE.fullmatch(str(asset_id)):
@@ -171,6 +167,7 @@ def canonicalize_images(record: dict[str, Any], image_dir: Path) -> None:
 	for entry in record.get("image_hashes", []):
 		if isinstance(entry, dict) and entry.get("filename") in name_map:
 			entry["filename"] = name_map[entry["filename"]]
+	return name_map
 
 
 def _timestamp() -> str:
@@ -305,7 +302,7 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"item": {"name": record.get("name", ""), "category": record.get("category", ""), "manufacturer": record.get("manufacturer", ""), "description": record.get("physical_description", ""), "condition": record.get("condition", []), "quantity": 1},
 		"identifiers": record.get("identifiers", {}),
 		"attributes": record.get("attributes", []),
-		"tags": previous.get("tags", record.get("tags", [managed_type_tag(record.get("category"))])),
+		"tags": previous.get("tags", record.get("tags", [])),
 		"location": previous.get("location", record.get("location", {"name": None, "path": []})),
 		"images": _image_entries(record, image_dir),
 		"homebox": homebox or previous.get("homebox", {"entity_id": None, "asset_id": None, "collection_id": None, "entity_type": None, "last_synced_at": None}),
@@ -353,5 +350,5 @@ def write_catalog(settings=None) -> Path:
 		images = manifest.get("images", [])
 		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "preview_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})
 	path = settings.persistent_data_dir / "catalog.json"
-	atomic_json_write(path, {"schema": CATALOG_SCHEMA, "schema_version": SCHEMA_VERSION, "updated_at": _timestamp(), "items": items})
+	atomic_json_write(path, {"schema": CATALOG_SCHEMA, "schema_version": CATALOG_SCHEMA_VERSION, "updated_at": _timestamp(), "items": items})
 	return path

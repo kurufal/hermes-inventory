@@ -481,6 +481,8 @@ def complete_entity(
 	*,
 	image_directory=None,
 	upload_attachments=True,
+	attachment_sync=None,
+	on_attachment_uploaded=None,
 ):
 	updated = update_entity(
 		entity_id,
@@ -503,7 +505,13 @@ def complete_entity(
 	if not upload_attachments:
 		return {"entity": updated, "attachments": attachments}
 
+	known = attachment_sync if isinstance(attachment_sync, dict) else {}
+	hashes = {str(entry.get("filename")): str(entry.get("sha256", "")) for entry in record.get("image_hashes", []) if isinstance(entry, dict)}
 	for filename in source_images:
+		digest = hashes.get(str(filename))
+		if digest and digest in known:
+			attachments.append(known[digest])
+			continue
 		image_path = (
 			source_directory
 			/ filename
@@ -514,11 +522,16 @@ def complete_entity(
 			image_path,
 		)
 
-		attachments.append({
+		attachment = {
 			"filename": filename,
 			"primary": False,
 			"result": result,
-		})
+		}
+		if digest:
+			attachment["sha256"] = digest
+		attachments.append(attachment)
+		if on_attachment_uploaded is not None:
+			on_attachment_uploaded(attachment)
 
 	return {
 		"entity": updated,

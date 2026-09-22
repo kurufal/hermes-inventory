@@ -7,7 +7,7 @@ from pathlib import Path
 from inventory.config import get_settings
 from inventory.hashing import sha256_file
 from inventory.storage import ITEM_SCHEMA
-from inventory.constants import CATALOG_SCHEMA, OBSERVATION_SCHEMA, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
+from inventory.constants import CATALOG_SCHEMA, OBSERVATION_SCHEMA, SUPPORTED_CATALOG_SCHEMA_VERSIONS, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
 from inventory.identity import match_manifest
 
 
@@ -61,8 +61,10 @@ def scan() -> dict:
 	if catalog_path.exists():
 		try:
 			catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-			if catalog.get("schema") != CATALOG_SCHEMA or catalog.get("schema_version") != SCHEMA_VERSION:
+			if catalog.get("schema") != CATALOG_SCHEMA or catalog.get("schema_version") not in SUPPORTED_CATALOG_SCHEMA_VERSIONS:
 				raise ValueError("unsupported catalog schema")
+			if catalog.get("schema_version") != max(SUPPORTED_CATALOG_SCHEMA_VERSIONS):
+				report["catalog_inconsistencies"].append("stale catalog schema; catalog can be rebuilt from canonical items")
 			entries = catalog.get("items")
 			if not isinstance(entries, list):
 				raise ValueError("catalog items is not a list")
@@ -100,9 +102,8 @@ def plan(*, settings=None, homebox_entities=None) -> dict:
 	report = {"present_in_both": [], "persistent_missing_from_homebox": [], "homebox_entity_mismatch": [], "pending_homebox_sync": [], "possible_conflicts": [], "status": "WARN"}
 	if homebox_entities is None:
 		try:
-			from inventory.homebox import list_entities
-			response = list_entities()
-			homebox_entities = response.get("items", []) if isinstance(response, dict) else []
+			from inventory.homebox import list_all_entities
+			homebox_entities = list_all_entities()
 		except Exception as exc:
 			return {**report, "homebox": f"unavailable: {type(exc).__name__}: {exc}"}
 	by_id = {str(entity.get("id")): entity for entity in homebox_entities if isinstance(entity, dict) and entity.get("id")}

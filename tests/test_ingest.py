@@ -141,8 +141,9 @@ class IngestCommittedImageTests(unittest.TestCase):
 			self.homebox_directories.append(Path(record["source_directory"]))
 			return {"id": "entity-1", "assetId": "asset-1", "groupId": "group-1", "entityTypeId": "type-1"}
 
-		def complete(entity_id, record, *, image_directory=None):
+		def complete(entity_id, record, *, image_directory=None, attachment_sync=None, on_attachment_uploaded=None):
 			self.assertEqual(entity_id, "entity-1")
+			self.assertEqual(attachment_sync, {})
 			directory = Path(image_directory)
 			self.homebox_directories.append(directory)
 			self.assertEqual(Path(record["source_directory"]), directory)
@@ -211,6 +212,19 @@ class IngestCommittedImageTests(unittest.TestCase):
 		destination.mkdir()
 		prepare_originals(manual_source, destination)
 		self.assertEqual((destination / "manual.jpg").read_bytes(), b"manual")
+
+	def test_exact_canonical_image_duplicate_skips_vision_and_transaction(self):
+		item = self.settings.items_dir / "INV-existing"
+		images = item / "images"
+		images.mkdir(parents=True)
+		duplicate = images / "existing.jpg"
+		duplicate.write_bytes((self.source / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").read_bytes())
+		from inventory.hashing import sha256_file
+		(item / "item.json").write_text(json.dumps({"schema": "hermes-inventory-item", "schema_version": 3, "inventory_id": "INV-existing", "asset_id": "000-001", "images": [{"relative_path": "images/existing.jpg", "sha256": sha256_file(duplicate)}]}), encoding="utf-8")
+		with patch("inventory.ingest.run_vision", side_effect=AssertionError("vision must not run")):
+			result = ingest(self.source, object(), settings=self.settings)
+		self.assertEqual(result["status"], "existing_item_with_new_image_evidence")
+		self.assertFalse(list(self.settings.items_dir.glob(".tmp-*")))
 
 
 if __name__ == "__main__":
