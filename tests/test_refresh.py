@@ -448,6 +448,33 @@ class RefreshTests(unittest.TestCase):
 		self.assertIn("inspect_ambiguous_legacy_group", report["proposed_actions"])
 		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] in {"migrate_legacy", "adopt_homebox"}])
 
+	def test_canonical_representation_resolves_historical_retry_group_without_deleting_evidence(self):
+		for inventory_id, names in (("INV-A", ("one.png", "two.png")), ("INV-B", ("one.png", "two.png")), ("INV-C", ("one.png",)), ("INV-D", ("two.png",))):
+			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+			metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+			originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+			for name in names:
+				(originals / name).write_bytes(name.encode("utf-8"))
+		hashes = [__import__("hashlib").sha256(name.encode("utf-8")).hexdigest() for name in ("one.png", "two.png")]
+		entity_fields = [{"name": "Image SHA-256", "value": "; ".join(hashes)}]
+		entities = [entity("hb-1", "000-009", entity_fields)]
+		unresolved = refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(len(unresolved["legacy"]["unresolved_retry_groups"]), 1)
+		self.assertEqual(len(unresolved["matches"]["ambiguous"]), 1)
+		canonical = self.write_item("INV-A", "000-009", entity_id="hb-1")
+		canonical["schema_version"] = 3
+		(self.settings.items_dir / "INV-A" / "item.json").write_text(json.dumps(canonical), encoding="utf-8")
+		resolved = refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(resolved["matches"]["represented_in_both"], [{"inventory_id": "INV-A", "entity_id": "hb-1", "kind": "stored_entity_id"}])
+		self.assertEqual(resolved["legacy"]["unresolved_retry_groups"], [])
+		self.assertEqual(resolved["matches"]["ambiguous"], [])
+		self.assertFalse(any(entry["type"] == "ambiguous_legacy_retry_group" for entry in resolved["conflicts"]))
+		self.assertEqual(build_plan(resolved)["actions"], [])
+		self.assertEqual(resolved["legacy"]["resolved_retry_groups"][0]["canonical_inventory_id"], "INV-A")
+		self.assertNotIn("inspect_ambiguous_legacy_group", resolved["proposed_actions"])
+		self.assertTrue((self.root / "metadata" / "INV-B.json").is_file())
+		self.assertTrue((self.root / "originals" / "INV-B" / "one.png").is_file())
+
 	def test_explicit_resolution_migrates_only_the_selected_ambiguous_candidate(self):
 		for inventory_id in ("INV-one", "INV-two"):
 			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)

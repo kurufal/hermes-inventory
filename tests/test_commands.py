@@ -53,6 +53,15 @@ class InventoryCommandTests(unittest.TestCase):
 		self.assertIn("Ambiguous matches: 1", output)
 		self.assertIn("inspect_ambiguous_legacy_group", output)
 
+	def test_verbose_refresh_distinguishes_resolved_historical_retries_from_ambiguity(self):
+		report = {"canonical": {"valid_items": [{"inventory_id": "INV-A", "asset_id": "000-009"}]}, "legacy": {"legacy_candidates": [], "unresolved_retry_groups": [], "resolved_retry_groups": [{"entity_id": "hb-1", "canonical_inventory_id": "INV-A", "legacy_paths": ["metadata/INV-A.json", "metadata/INV-B.json"], "reason": "represented_by_canonical_item"}]}, "homebox": {"items": [{"entity_id": "hb-1", "asset_id": "000-009", "name": "The Martian"}], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
+		output = _format_refresh(report, verbose=True, plan={"actions": []})
+		self.assertIn("Historical retry groups:", output)
+		self.assertIn("Canonical Inventory ID: INV-A", output)
+		self.assertIn("Legacy retry records retained: 2", output)
+		self.assertNotIn("resolve_ambiguous_match", output)
+		self.assertNotIn("inspect_ambiguous_legacy_group", output)
+
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=False), patch("inventory.commands.storage_health", return_value=(True, "reachable")):

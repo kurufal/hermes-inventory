@@ -356,6 +356,11 @@ def refresh(*, settings=None, homebox_entities=None):
 	legacy["relationships"] = _legacy_relationships(legacy["legacy_candidates"], homebox_items) if homebox_complete else {}
 	legacy_by_path = {entry["path"]: entry for entry in legacy["legacy_candidates"]}
 	legacy["unresolved_retry_groups"] = []
+	legacy["resolved_retry_groups"] = []
+	canonical_matches_by_entity_id = {}
+	for entry in matches["represented_in_both"]:
+		canonical_matches_by_entity_id.setdefault(str(entry["entity_id"]), []).append(entry["inventory_id"])
+	canonical_by_entity_id = {entity_id: inventory_ids[0] for entity_id, inventory_ids in canonical_matches_by_entity_id.items() if len(inventory_ids) == 1}
 	for group in legacy["retry_groups"]:
 		hash_sets = {path: set(values) for path, values in group["hash_sets"].items()}
 		entity_ids = sorted({str(legacy["relationships"].get(path, {}).get("entity_id")) for path in group["paths"] if legacy["relationships"].get(path, {}).get("classification") == "matched"})
@@ -383,6 +388,9 @@ def refresh(*, settings=None, homebox_entities=None):
 		if len(maximal_paths) > 1 or entity_ids:
 			assets = sorted({str(legacy_by_path[path].get("asset_id")) for path in group["paths"] if legacy_by_path.get(path, {}).get("asset_id")})
 			shared_hashes = sorted(set.intersection(*hash_sets.values())) if hash_sets else []
+			if len(entity_ids) == 1 and entity_ids[0] in canonical_by_entity_id:
+				legacy["resolved_retry_groups"].append({"entity_id": entity_ids[0], "canonical_inventory_id": canonical_by_entity_id[entity_ids[0]], "legacy_paths": group["paths"], "reason": "represented_by_canonical_item"})
+				continue
 			diagnostic = {"type": "ambiguous_legacy_retry_group", "entity_ids": entity_ids, "asset_ids": assets, "paths": group["paths"], "inventory_ids": [legacy_by_path[path].get("item_id") or legacy_by_path[path].get("inventory_id") for path in group["paths"]], "shared_hashes": shared_hashes, "reason": "multiple equally complete legacy image sets"}
 			legacy["unresolved_retry_groups"].append(diagnostic)
 			conflicts.append(diagnostic)

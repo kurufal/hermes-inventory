@@ -94,6 +94,18 @@ def _format_ambiguities(report, *, verbose=False):
 	return lines
 
 
+def _format_resolved_retry_groups(report):
+	groups = report["legacy"].get("resolved_retry_groups", [])
+	if not groups:
+		return []
+	items = {str(item.get("entity_id")): item for item in report["homebox"]["items"] if isinstance(item, dict)}
+	lines = ["", "Historical retry groups:"]
+	for group in groups:
+		entity = items.get(str(group["entity_id"]), {})
+		lines.extend([f"- {entity.get('name') or 'Unnamed item'} [{entity.get('asset_id') or 'no Asset ID'}]", f"  Canonical Inventory ID: {group['canonical_inventory_id']}", f"  Legacy retry records retained: {len(group['legacy_paths'])}", "  Status: RESOLVED"])
+	return lines
+
+
 def _format_refresh(report, *, apply_result=None, verbose=False, resolution_preview=False, plan=None, resolution=None):
 	matches = report["matches"]
 	mode = "RESOLUTION PREVIEW" if resolution_preview else ("READ-ONLY PREVIEW" if apply_result is None else "APPLY")
@@ -126,6 +138,7 @@ def _format_refresh(report, *, apply_result=None, verbose=False, resolution_prev
 		lines.extend(["", "Run:", "/inventory refresh --verbose"])
 	if verbose:
 		lines.extend(["", "Canonical:", *[f"- {entry['inventory_id']} [{entry['asset_id']}]" for entry in report["canonical"]["valid_items"]], "HomeBox-only:", *[f"- {entry.get('name') or 'Unnamed item'} [{entry.get('asset_id') or 'no Asset ID'}]" for entry in matches["homebox_only"]], "Local-only:", *[f"- {entry['inventory_id']} [{entry['asset_id']}]" for entry in matches["local_only"]], "Conflicts:", *[f"- {entry['type']}" for entry in report["conflicts"]]])
+		lines.extend(_format_resolved_retry_groups(report))
 		if plan is not None:
 			lines.extend(["Deterministic plan:", *[f"- {action['type']}" for action in plan["actions"]]])
 	if resolution is not None:
