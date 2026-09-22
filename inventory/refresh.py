@@ -362,22 +362,29 @@ def refresh(*, settings=None, homebox_entities=None):
 	legacy["unresolved_retry_groups"] = []
 	for group in legacy["retry_groups"]:
 		hash_sets = {path: set(values) for path, values in group["hash_sets"].items()}
-		maximal_paths = [path for path, hashes in hash_sets.items() if not any(hashes < other for other in hash_sets.values())]
-		if len(maximal_paths) == 1:
-			group["selected_path"] = maximal_paths[0]
+		entity_ids = sorted({str(legacy["relationships"].get(path, {}).get("entity_id")) for path in group["paths"] if legacy["relationships"].get(path, {}).get("classification") == "matched"})
+		matched_entity = next((entry for entry in homebox_items if len(entity_ids) == 1 and str(entry["entity_id"]) == entity_ids[0]), None)
+		complete_paths = []
+		if matched_entity:
+			homebox_hashes = image_sha256_values(matched_entity)
+			complete_paths = [path for path, hashes in hash_sets.items() if hashes == homebox_hashes]
+		if len(complete_paths) == 1 and all(hashes <= homebox_hashes for hashes in hash_sets.values()):
+			group["selected_path"] = complete_paths[0]
 			continue
 		identity_winners = []
-		for path in maximal_paths:
-			relationship = legacy["relationships"].get(path, {})
-			entity = next((entry for entry in homebox_items if str(entry["entity_id"]) == str(relationship.get("entity_id"))), None)
-			legacy_id = str(legacy_by_path[path].get("inventory_id") or "")
-			if entity and is_valid_inventory_id(legacy_id) and legacy_id in _homebox_inventory_ids(entity):
-				identity_winners.append(path)
+		if matched_entity:
+			for path in complete_paths:
+				legacy_id = str(legacy_by_path[path].get("item_id") or legacy_by_path[path].get("inventory_id") or "")
+				if is_valid_inventory_id(legacy_id) and legacy_id in _homebox_inventory_ids(matched_entity):
+					identity_winners.append(path)
 		if len(identity_winners) == 1:
 			group["selected_path"] = identity_winners[0]
 			continue
-		if len(maximal_paths) > 1:
-			entity_ids = sorted({str(legacy["relationships"].get(path, {}).get("entity_id")) for path in group["paths"] if legacy["relationships"].get(path, {}).get("classification") == "matched"})
+		maximal_paths = [path for path, hashes in hash_sets.items() if not any(hashes < other for other in hash_sets.values())]
+		if not entity_ids and len(maximal_paths) == 1:
+			group["selected_path"] = maximal_paths[0]
+			continue
+		if len(maximal_paths) > 1 or entity_ids:
 			assets = sorted({str(legacy_by_path[path].get("asset_id")) for path in group["paths"] if legacy_by_path.get(path, {}).get("asset_id")})
 			shared_hashes = sorted(set.intersection(*hash_sets.values())) if hash_sets else []
 			diagnostic = {"type": "ambiguous_legacy_retry_group", "entity_ids": entity_ids, "asset_ids": assets, "paths": group["paths"], "inventory_ids": [legacy_by_path[path].get("item_id") or legacy_by_path[path].get("inventory_id") for path in group["paths"]], "shared_hashes": shared_hashes, "reason": "multiple equally complete legacy image sets"}

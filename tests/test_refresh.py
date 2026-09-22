@@ -383,10 +383,18 @@ class RefreshTests(unittest.TestCase):
 		metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": asset_id, "result": {"object_type": {"value": "Game"}, "product_or_title": {"value": "Forbidden Desert"}}}), encoding="utf-8")
 		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
 		(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
+		for retry_id, names in (("INV-retry-one", ("one.png",)), ("INV-retry-two", ("two.png",)), ("INV-retry-three", ("one.png",))):
+			retry_metadata = self.root / "metadata" / f"{retry_id}.json"
+			retry_metadata.write_text(json.dumps({"inventory_id": retry_id, "asset_id": asset_id}), encoding="utf-8")
+			retry_originals = self.root / "originals" / retry_id; retry_originals.mkdir()
+			for name in names:
+				(retry_originals / name).write_bytes((originals / name).read_bytes())
 		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in (b"one", b"two")]
 		fields = [{"name": "Inventory Item ID", "value": inventory_id}, {"name": "Image SHA-256", "value": "; ".join(hashes)}]
 		entities = [entity("hb-game", asset_id, fields, "Forbidden Desert")]
-		plan = build_plan(refresh(settings=self.settings, homebox_entities=entities))
+		report = refresh(settings=self.settings, homebox_entities=entities)
+		self.assertFalse(report["legacy"]["unresolved_retry_groups"])
+		plan = build_plan(report)
 		self.assertEqual([(action["type"], action["inventory_id"], action.get("entity_id"), action.get("asset_id")) for action in plan["actions"]], [("migrate_legacy", inventory_id, "hb-game", asset_id)])
 		result = apply_refresh(settings=self.settings, homebox_entities=entities)
 		self.assertEqual([action["type"] for action in result["applied"]], ["migrate_legacy"])
