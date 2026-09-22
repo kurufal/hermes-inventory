@@ -220,6 +220,95 @@ class RefreshTests(unittest.TestCase):
 		catalog.assert_called()
 		self.assertTrue((self.root / "catalog.json").is_file())
 
+	def write_legacy(self, inventory_id, asset_id, entity_id=None):
+		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+		payload = {"inventory_id": inventory_id, "asset_id": asset_id, "source_images": ["cover.jpg"], "result": {"object_type": {"value": "Book"}, "product_or_title": {"value": inventory_id}}}
+		if entity_id:
+			payload["homebox_entity_id"] = entity_id
+		metadata.write_text(json.dumps(payload), encoding="utf-8")
+		original = self.root / "originals" / inventory_id; original.mkdir(parents=True, exist_ok=True); (original / "cover.jpg").write_bytes(b"cover-" + inventory_id.encode())
+
+	def test_legacy_claims_linked_homebox_before_adoption(self):
+		self.write_legacy("INV-old", "000-009", "hb-1")
+		entities = [entity("hb-1", "000-009", [{"name": "Inventory Item ID", "textValue": "INV-old"}])]
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=entities))
+		self.assertEqual([(action["type"], action["inventory_id"], action.get("entity_id")) for action in plan["actions"]], [("migrate_legacy", "INV-old", "hb-1")])
+
+	def test_legacy_explicit_link_without_inventory_field_prevents_adoption(self):
+		self.write_legacy("INV-old", "000-009", "hb-1")
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-009")]))
+		self.assertEqual([action["type"] for action in plan["actions"]], ["migrate_legacy"])
+
+	def test_legacy_identity_conflict_blocks_migration_and_adoption(self):
+		self.write_legacy("INV-old", "000-009", "hb-1")
+		entities = [entity("hb-1", "000-009"), entity("hb-2", "000-010", [{"name": "Inventory Item ID", "textValue": "INV-old"}])]
+		report = refresh(settings=self.settings, homebox_entities=entities)
+		self.assertIn("legacy_homebox_identity_conflict", [entry["type"] for entry in report["conflicts"]])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] in {"migrate_legacy", "adopt_homebox"}])
+
+	def test_unrelated_legacy_and_homebox_each_get_one_action(self):
+		self.write_legacy("INV-old", "000-009")
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-010")]))
+		self.assertEqual({action["type"] for action in plan["actions"]}, {"migrate_legacy", "adopt_homebox"})
+
+	def test_adoption_drops_none_identifiers_and_keeps_top_level_serial_model(self):
+		entities = [dict(entity("hb-1", "000-010"), serialNumber="SER-1", modelNumber="MODEL-1")]
+		result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		manifest = json.loads(next(self.settings.items_dir.glob("*/item.json")).read_text(encoding="utf-8"))
+		self.assertEqual(manifest["identifiers"], {"serial_number": ["SER-1"], "model_number": ["MODEL-1"]})
+		self.assertEqual(result["applied"][0]["type"], "adopt_homebox")
+
+	def test_empty_adoption_identifiers_remain_empty(self):
+		result = apply_refresh(settings=self.settings, homebox_entities=[entity("hb-empty", "000-010")])
+		manifest = json.loads(next(self.settings.items_dir.glob("*/item.json")).read_text(encoding="utf-8"))
+		self.assertEqual(manifest["identifiers"], {})
+		self.assertEqual(result["applied"][0]["type"], "adopt_homebox")
+
+	def test_adoption_merges_repeated_custom_identifier_fields(self):
+		fields = [{"name": "Serial Number", "textValue": "SER-1"}, {"name": "Serial Number", "textValue": "SER-2"}]
+		apply_refresh(settings=self.settings, homebox_entities=[entity("hb-many", "000-010", fields)])
+		manifest = json.loads(next(self.settings.items_dir.glob("*/item.json")).read_text(encoding="utf-8"))
+		self.assertEqual(manifest["identifiers"], {"serial_number": ["SER-1", "SER-2"]})
+
+	def test_asset_conflicts_block_adoption_and_links(self):
+		self.write_item("INV-local", "000-001")
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-other", "000-001")])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox"])
+		report = refresh(settings=self.settings, homebox_entities=[entity("a", "000-002"), entity("b", "000-002")])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox"])
+
+	def test_unsafe_external_inventory_ids_never_become_item_directories(self):
+		for unsafe in ("../escape", "..\\escape", "INV-/slash", "INV-\\slash", "C:\\outside"):
+			report = refresh(settings=self.settings, homebox_entities=[entity("hb-" + str(len(unsafe)), "000-010", [{"name": "Inventory Item ID", "textValue": unsafe}])])
+			action = next(action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox")
+			self.assertTrue(action["inventory_id"].startswith("INV-HB-"))
+		metadata = self.root / "metadata" / "unsafe.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+		metadata.write_text(json.dumps({"inventory_id": "../unsafe", "asset_id": "000-011"}), encoding="utf-8")
+		self.assertFalse(build_plan(refresh(settings=self.settings, homebox_entities=[]))["actions"])
+
+	def test_combined_legacy_and_homebox_repair_is_idempotent(self):
+		self.write_legacy("INV-A", "000-009", "hb-a")
+		self.write_legacy("INV-B", "000-010", "hb-b")
+		entities = [entity("hb-a", "000-009", [{"name": "Inventory Item ID", "textValue": "INV-A"}]), entity("hb-b", "000-010"), entity("hb-c", "000-011")]
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=entities))
+		self.assertEqual([entry["type"] for entry in plan["actions"]], ["migrate_legacy", "migrate_legacy", "adopt_homebox"])
+		adopted_id = plan["actions"][-1]["inventory_id"]
+		result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(len(result["applied"]), 3)
+		manifests = [json.loads(path.read_text(encoding="utf-8")) for path in self.settings.items_dir.glob("*/item.json")]
+		self.assertEqual({manifest["inventory_id"] for manifest in manifests}, {"INV-A", "INV-B", adopted_id})
+		self.assertEqual(next(manifest for manifest in manifests if manifest["inventory_id"] == "INV-A")["homebox"]["entity_id"], "hb-a")
+		self.assertEqual(next(manifest for manifest in manifests if manifest["inventory_id"] == "INV-B")["status"], "synced")
+		self.assertEqual(apply_refresh(settings=self.settings, homebox_entities=entities)["applied"], [])
+
+	def test_live_link_revalidates_current_homebox_identity(self):
+		self.write_item(identifiers={"serial_number": ["SER-1"]})
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-001", [{"name": "Serial Number", "textValue": "SER-1"}])])
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "link_homebox")
+		with patch("inventory.homebox.get_entity", return_value=entity("hb-1", "000-001", [{"name": "Serial Number", "textValue": "changed"}])):
+			with self.assertRaisesRegex(RuntimeError, "HomeBox identity changed"):
+				_apply_action(action, report, self.settings, live_homebox=True)
+
 
 class HomeBoxPaginationTests(unittest.TestCase):
 	def response(self, payload):

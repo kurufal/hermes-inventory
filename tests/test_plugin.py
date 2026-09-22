@@ -196,6 +196,13 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("EXACT_DUPLICATE", result)
 		self.assertIn("requires_user_action", result)
 
+	def test_exact_image_duplicate_uses_same_no_decision_wrapper_behavior(self):
+		duplicate = {"classification": "EXACT_IMAGE_DUPLICATE", "created": False, "durable": True, "inventory_id": "INV-existing", "asset_id": "000-001", "name": "Existing"}
+		result, _, _ = self.run_ingest([str(self.explicit)], backend_result=duplicate)
+		self.assertIn("EXACT_IMAGE_DUPLICATE", result)
+		self.assertIn('"requires_user_action": false', result)
+		self.assertIn("INV-existing", result)
+
 	def test_no_pending_batch_returns_structured_error(self):
 		with patch.object(
 			self.plugin,

@@ -41,5 +41,5 @@ def canonical_image_index(settings):
 			declared = str(image.get("sha256", "")).casefold()
 			if declared and declared != actual:
 				diagnostics["checksum_mismatches"].append(str(path)); continue
-			index[actual].append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "relative_path": str(relative), "canonical_filename": image.get("canonical_filename", path.name), "source_filename": image.get("source_filename", image.get("original_filename", path.name)), "path": str(path)})
+			index[actual].append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": manifest.get("item", {}).get("name"), "relative_path": str(relative), "canonical_filename": image.get("canonical_filename", path.name), "source_filename": image.get("source_filename", image.get("original_filename", path.name)), "path": str(path)})
 	return dict(index), diagnostics

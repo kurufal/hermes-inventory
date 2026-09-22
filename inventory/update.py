@@ -136,7 +136,7 @@ def _asset_id_available(asset_id, manifest, settings):
 	try:
 		from inventory.config import homebox_url
 		from inventory.homebox import list_all_entities
-		if not homebox_url():
+		if not homebox_url(settings):
 			return
 		entities = list_all_entities()
 		for entity in entities if isinstance(entities, list) else []:

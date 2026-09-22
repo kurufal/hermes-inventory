@@ -1,6 +1,7 @@
 """Tests for ingest orchestration and vision failure diagnostics."""
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -136,7 +137,7 @@ class IngestCommittedImageTests(unittest.TestCase):
 		metadata_path.write_text(json.dumps(raw), encoding="utf-8")
 		return raw, metadata_path
 
-	def _run_ingest(self, complete_side_effect=None):
+	def _run_ingest(self, complete_side_effect=None, duplicate_result=None):
 		def create(record):
 			self.homebox_directories.append(Path(record["source_directory"]))
 			return {"id": "entity-1", "assetId": "asset-1", "groupId": "group-1", "entityTypeId": "type-1"}
@@ -155,7 +156,7 @@ class IngestCommittedImageTests(unittest.TestCase):
 
 		with patch("inventory.ingest.run_vision", side_effect=self.fake_vision), patch(
 			"inventory.ingest.check_homebox_duplicates",
-			return_value={"classification": "NEW_ITEM", "candidates": []},
+			return_value=duplicate_result or {"classification": "NEW_ITEM", "candidates": []},
 		), patch("inventory.ingest.create_entity", side_effect=create), patch(
 			"inventory.ingest.complete_entity", side_effect=complete,
 		), patch(
@@ -275,6 +276,18 @@ class IngestCommittedImageTests(unittest.TestCase):
 			result = ingest(self.source, object(), settings=self.settings)
 		self.assertEqual(result["status"], "exact_image_conflict")
 		self.assertEqual(result["classification"], "EXACT_IMAGE_CONFLICT")
+
+	def test_product_and_name_duplicate_evidence_do_not_block_second_physical_copy(self):
+		for classification in ("SAME_IDENTIFIED_PRODUCT", "POSSIBLE_SAME_PRODUCT"):
+			result = self._run_ingest(duplicate_result={"classification": classification, "candidates": []})
+			self.assertEqual(result["status"], "created")
+			shutil.rmtree(self.settings.items_dir)
+
+	def test_serial_and_homebox_exact_duplicate_still_block(self):
+		for classification in ("SAME_PHYSICAL_UNIT", "EXACT_DUPLICATE"):
+			result = self._run_ingest(duplicate_result={"classification": classification, "candidates": []})
+			self.assertEqual(result["status"], "duplicate_candidate")
+			self.assertEqual(result["classification"], classification)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ class InventoryCommandTests(unittest.TestCase):
 			self.assertNotIn("already reconciled", output)
 		self.assertIn("Remaining actions were not attempted.", _format_refresh(report, apply_result={"status": "ERROR", "applied": [{"type": "link_homebox"}], "failed": {"action": {"type": "adopt_homebox"}, "error": "boom"}, "skipped": [{"reason": "not_attempted_after_failure"}]}))
 
+	def test_dry_run_includes_reconciliation_counts_and_asset_conflict_count(self):
+		report = {"canonical": {"valid_items": [1]}, "legacy": {"legacy_candidates": [1]}, "homebox": {"items": [1], "complete": True}, "matches": {"homebox_only": [1], "local_only": [1], "ambiguous": [1]}, "asset_ids": {"conflicting": ["000-001"]}, "conflicts": [{"type": "strong_identity_conflict"}], "reservations": {"unmatched": [1]}, "transactions": {"incomplete": [1]}, "proposed_actions": []}
+		output = _format_refresh(report)
+		self.assertIn("Canonical items: 1", output)
+		self.assertIn("Asset ID conflicts: 1", output)
+
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=False), patch("inventory.commands.storage_health", return_value=(True, "reachable")):

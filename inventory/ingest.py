@@ -94,7 +94,8 @@ def ingest(source_directory, vision_client, *, settings=None):
 			return {"status": "exact_image_conflict", "created": False, "durable": False, "classification": "EXACT_IMAGE_CONFLICT", "inventory_ids": sorted(matched_items), "hashes": sorted(matched)}
 		existing = next(iter(matched_items))
 		if len(matched) == len(incoming_hashes):
-			result = {"status": "exact_image_duplicate", "created": False, "durable": True, "classification": "EXACT_IMAGE_DUPLICATE", "inventory_id": existing, "hashes": sorted(incoming_hashes)}
+			existing_entry = next(entry for entries in matched.values() for entry in entries if entry["inventory_id"] == existing)
+			result = {"status": "exact_image_duplicate", "created": False, "durable": True, "classification": "EXACT_IMAGE_DUPLICATE", "inventory_id": existing, "asset_id": existing_entry.get("asset_id"), "name": existing_entry.get("name"), "hashes": sorted(incoming_hashes)}
 			result["receipt_path"] = str(save_receipt(f"observation-{uuid.uuid4().hex}", result, settings))
 			return result
 		return {"status": "existing_item_with_new_image_evidence", "created": False, "durable": False, "inventory_id": existing, "existing_hashes": sorted(matched), "new_hashes": sorted(incoming_hashes - set(matched))}
@@ -118,7 +119,7 @@ def ingest(source_directory, vision_client, *, settings=None):
 			for filename in record.get("source_images", []) if filename in verified_hashes
 		]
 		duplicate_result = check_homebox_duplicates(record)
-		if duplicate_result["classification"] != "NEW_ITEM":
+		if duplicate_result["classification"] in {"EXACT_DUPLICATE", "SAME_PHYSICAL_UNIT"}:
 			save_duplicate_observation(item_id, record, raw, duplicate_result, images_dir, settings)
 			abandon_item_transaction(transaction)
 			result = {"status": "duplicate_candidate", "created": False, "durable": True, "item_id": item_id, "classification": duplicate_result["classification"], "duplicate_check": duplicate_result}

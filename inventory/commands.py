@@ -100,7 +100,7 @@ def _format_refresh(report, *, apply_result=None):
 			lines.extend(["Applied:", *[f"- {action.get('type', 'action')}" for action in applied]])
 		if failed and any(entry.get("reason") == "not_attempted_after_failure" for entry in skipped):
 			lines.append("Remaining actions were not attempted.")
-		lines.extend(["", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report['conflicts'])}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"])
+	lines.extend(["", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report.get('asset_ids', {}).get('conflicting', []))}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"])
 	if not report["homebox"]["complete"]:
 		lines.append("[WARN] HomeBox enumeration incomplete; no globally safe next Asset ID is reported.")
 	if report["proposed_actions"]:

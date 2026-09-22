@@ -52,7 +52,7 @@ INVENTORY_INGEST_DESCRIPTION = (
 	"available. If the user refers to a recent upload and Hermes exposes no usable "
 	"explicit path, use use_pending_upload=true. This tool performs its own vision "
 	"analysis; do not call generic vision analysis first merely to prepare ingestion. "
-	"When an item is classified as an EXACT_DUPLICATE, report the existing item and "
+	"When an item is classified as an EXACT_DUPLICATE or EXACT_IMAGE_DUPLICATE, report the existing item and "
 	"do not offer a follow-up decision."
 )
 
@@ -237,17 +237,17 @@ def inventory_ingest(
 		result["tool"] = "inventory_ingest"
 		result["input_image_count"] = len(images)
 
-		if result.get("classification") == "EXACT_DUPLICATE":
+		if result.get("classification") in {"EXACT_DUPLICATE", "EXACT_IMAGE_DUPLICATE"}:
 			candidates = (
 				result.get("duplicate_check", {})
 				.get("candidates", [])
 			)
 
-			candidate = candidates[0] if candidates else {}
+			candidate = candidates[0] if candidates else result
 
 			result["requires_user_action"] = False
 			result["assistant_instruction"] = (
-				"This is an EXACT_DUPLICATE. No new HomeBox item was created "
+				"This is an exact duplicate. No new HomeBox item was created "
 				"and no user decision is required. Tell the user that the item "
 				"is already in inventory and identify the existing item using "
 				"the candidate name and asset_id when available. Do not offer "

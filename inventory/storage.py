@@ -21,6 +21,12 @@ from inventory.hashing import sha256_file
 
 _ASSET_LOCK = threading.Lock()
 _ASSET_RE = re.compile(r"^\d{3}-\d{3}$")
+_INVENTORY_ID_RE = re.compile(r"^INV-[A-Za-z0-9._-]{1,120}$")
+
+
+def is_valid_inventory_id(value: object) -> bool:
+	"""Accept compatible Inventory IDs without allowing filesystem components."""
+	return isinstance(value, str) and bool(_INVENTORY_ID_RE.fullmatch(value))
 
 
 def format_asset_id(number: int) -> str:
@@ -238,10 +244,14 @@ migrate_manifest = upgrade_manifest_schema
 
 def item_directory(item_id: str, settings=None) -> Path:
 	settings = settings or get_settings()
+	if not is_valid_inventory_id(item_id):
+		raise ValueError("Invalid Inventory ID")
 	return settings.items_dir / item_id
 
 
 def begin_item_transaction(item_id: str, settings) -> Path:
+	if not is_valid_inventory_id(item_id):
+		raise ValueError("Invalid Inventory ID")
 	settings.items_dir.mkdir(parents=True, exist_ok=True)
 	transaction = settings.items_dir / f".tmp-{item_id}-{uuid.uuid4().hex}"
 	transaction.mkdir()

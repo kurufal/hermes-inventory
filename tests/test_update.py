@@ -100,7 +100,7 @@ class InventoryUpdateTests(unittest.TestCase):
 				update_item("000-026", "edit", {"asset_id": "000-027"}, settings=self.settings)
 
 	def test_edit_renames_images_and_retains_hash_and_provenance(self):
-		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+		with patch("inventory.config.homebox_url", return_value=""), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
 			update_item("000-011", "edit", {"name": "Cyberpunk / No: Coincidence", "asset_id": "000-025"}, settings=self.settings)
 		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
 		self.assertTrue(all(image["canonical_filename"].startswith("000-025_cyberpunk-no-coincidence_") for image in manifest["images"]))
