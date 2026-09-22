@@ -97,6 +97,13 @@ API keys are never accepted as slash-command arguments and never appear in outpu
 
 Automatic detection watches only `$HERMES_HOME/images` and only Hermes-managed `dashboard_*`, `upload_*`, and `clip_*` image filenames. It supports existing Dashboard filenames such as `dashboard_20260815_190339_<id>_signal-photo.jpg` and Desktop upload/clip names.
 
+Hermes exposes three Inventory tools: `inventory_ingest` to add or catalog a
+physical item, `inventory_search` to read existing canonical Inventory data,
+and `inventory_update` to edit, reanalyze, or resync an existing item. They
+apply only when the user clearly asks to operate on Inventory or HomeBox data;
+greetings, tests, connection/model checks, plugin development questions, and
+attachments without an Inventory request do not trigger them.
+
 `$HERMES_HOME/media`, `$HERMES_HOME/image_cache`, and `$HERMES_HOME/user_media` are never automatically scanned. Desktop composer images at `%APPDATA%\Hermes\composer-images` are also never watched, but an existing path Hermes explicitly supplies in `image_paths` is trusted on a local Desktop backend. The internal Python `ingest(source_directory, ...)` API can use an explicitly supplied source directory for development/testing. The chat tool otherwise accepts only `$HERMES_HOME/images` and trusted current Desktop composer paths, never arbitrary filesystem paths. A composer path unavailable to a remote Linux/Docker backend is rejected rather than guessed.
 
 ## Updating the Plugin

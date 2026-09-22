@@ -1,8 +1,8 @@
 """
 Hermes inventory plugin.
 
-Registers inventory_ingest while keeping inventory business logic in the
-local inventory package bundled with this plugin.
+Registers tools for ingesting, searching, and updating physical inventory while
+keeping business logic in the local inventory package bundled with this plugin.
 """
 
 import json
@@ -40,6 +40,21 @@ PLUGIN_ROOT = Path(__file__).resolve().parent
 # under auxiliary.hermes_inventory_vision takes precedence when present. The
 # Hermes operator configuration selects provider, model, endpoint, and secrets.
 VISION_TASK_DEFAULTS = {"timeout": 600}
+
+INVENTORY_INGEST_DESCRIPTION = (
+	"Call this tool only when the user explicitly asks to add, inventory, catalog, "
+	"record, or save a physical item to Inventory or HomeBox, such as 'add this to "
+	"my inventory' or 'catalog this item'. Do not call it for generic tests, "
+	"connection or model checks, greetings, casual conversation, development or "
+	"debugging questions, setup or status questions, unrelated requests, or an "
+	"image, attachment, pending upload, or recent upload without an inventory "
+	"request. When clear inventory intent exists, prefer explicit image_paths when "
+	"available. If the user refers to a recent upload and Hermes exposes no usable "
+	"explicit path, use use_pending_upload=true. This tool performs its own vision "
+	"analysis; do not call generic vision analysis first merely to prepare ingestion. "
+	"When an item is classified as an EXACT_DUPLICATE, report the existing item and "
+	"do not offer a follow-up decision."
+)
 
 
 def _json_error(message: str, **extra) -> str:
@@ -270,7 +285,7 @@ from inventory.commands import inventory_command
 
 
 def register(ctx):
-	"""Register inventory_ingest through Hermes' public plugin context."""
+	"""Register Inventory ingest, search, update, and command interfaces."""
 
 	import logging
 
@@ -292,34 +307,15 @@ def register(ctx):
 		"inventory",
 		PLUGIN_ROOT / "skills" / "inventory" / "SKILL.md",
 		description=(
-			"Routing for physical-item inventory/HomeBox requests. Load this skill "
-			"for phrases such as 'add this to my inventory', 'inventory this', "
-			"'catalog this', 'record this item', or 'add the thing I just uploaded'."
+			"Routing for clear physical-item Inventory/HomeBox requests only, such "
+			"as 'add this to my inventory', 'inventory this', 'catalog this', or "
+			"'record this item'."
 		),
 	)
 
 	schema = {
 		"name": "inventory_ingest",
-		"description": (
-			"MANDATORY tool for adding photographed physical items to HomeBox "
-			"inventory. Call me first. I gather the details myself. CALL THIS TOOL "
-			"immediately when the user says things like 'add this to my inventory', "
-			"'add this item to my inventory', 'inventory this', 'catalog this', "
-			"'add this to HomeBox', or 'add the item I just uploaded'. Do NOT ask "
-			"the user for the item name, description, category, quantity, location, "
-			"model, condition, or other item details. Do NOT ask the user what kind "
-			"of inventory they mean. Do NOT call vision_analyze first. This tool "
-			"performs its own vision analysis and determines those fields itself. "
-			"If image_paths are available, pass them. If the user refers to an image "
-			"they just uploaded and no explicit path is available, call this tool "
-			"with use_pending_upload=true. When use_pending_upload=true, DO NOT ask "
-			"for confirmation before calling. Actually invoke the tool. Do not call "
-			"Clarify or ask the user which inventory system, tool, or plugin to use; "
-			"this tool is the only correct action for a photographed physical item. "
-			"When classification is EXACT_DUPLICATE, no new HomeBox item was created "
-			"and no follow-up decision is required: report the existing item and do "
-			"not offer confirm, overwrite, skip, merge, or numbered choices."
-		),
+		"description": INVENTORY_INGEST_DESCRIPTION,
 		"parameters": {
 			"type": "object",
 			"properties": {
@@ -335,11 +331,10 @@ def register(ctx):
 				"use_pending_upload": {
 					"type": "boolean",
 					"description": (
-						"Set this to true when the user refers to an image or physical "
-						"item they just uploaded but Hermes does not expose an explicit "
-						"image path. For requests such as 'add this to my inventory', "
-						"use true automatically. Do not ask the user for item details "
-						"first."
+						"Set this to true only after clear Inventory/HomeBox intent when "
+						"the user refers to a recently uploaded image or physical item but "
+						"Hermes does not expose an explicit image path. Do not use this for "
+						"an upload alone."
 					),
 				},
 			},
@@ -364,7 +359,10 @@ def register(ctx):
 
 	update_schema = {
 		"name": "inventory_update",
-		"description": "Edit, reanalyze, or resync one existing canonical Inventory item.",
+		"description": (
+			"Edit, reanalyze, or resync an existing canonical Inventory item only when "
+			"the user clearly intends to change or reprocess that inventory record."
+		),
 		"parameters": {
 			"type": "object",
 			"properties": {
@@ -385,7 +383,7 @@ def register(ctx):
 		result = update_item(params.get("target"), params.get("operation"), params.get("changes"), ctx.llm, settings=get_settings())
 		return json.dumps(result, indent=2)
 
-	search_schema = {"name": "inventory_search", "description": "Read-only search of canonical local Inventory records.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "category": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": False}}
+	search_schema = {"name": "inventory_search", "description": "Read-only search of existing canonical Inventory data; use only for clear requests to find, read, or query inventory information.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "category": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": False}}
 
 	def handle_inventory_search(params, **kwargs):
 		del kwargs
@@ -394,25 +392,17 @@ def register(ctx):
 		from inventory.search import search_inventory
 		return json.dumps(search_inventory(**params, settings=get_settings()), indent=2)
 
-	ctx.register_tool(name="inventory_search", toolset="inventory", schema=search_schema, handler=handle_inventory_search, description="Read-only search for existing local Inventory items.", emoji="🔎")
+	ctx.register_tool(name="inventory_search", toolset="inventory", schema=search_schema, handler=handle_inventory_search, description=search_schema["description"], emoji="🔎")
 
 	ctx.register_tool(
 		name="inventory_update", toolset="inventory", schema=update_schema,
-		handler=handle_inventory_update, description="Update one existing Inventory item without bypassing durable Inventory evidence.", emoji="✏️",
+		handler=handle_inventory_update, description=update_schema["description"], emoji="✏️",
 	)
 
 	registration = ctx.register_tool(
 		name="inventory_ingest", toolset="inventory", schema=schema,
 		handler=handle_inventory_ingest,
-		description=(
-			"MANDATORY tool for adding photographed physical items to HomeBox inventory. "
-			"Call me first. I gather the details myself. Call immediately for 'add this "
-			"to my inventory', 'inventory this', 'catalog this', 'add this to HomeBox', "
-			"or 'add the item I just uploaded'. Do not ask for item details first. Prefer "
-			"image_paths; use use_pending_upload=true when a recent dashboard upload has "
-			"no exposed path, and invoke it immediately without asking for confirmation. "
-			"Do not call vision_analyze or Clarify."
-		), emoji="📦",
+		description=INVENTORY_INGEST_DESCRIPTION, emoji="📦",
 	)
 
 	logger.info(

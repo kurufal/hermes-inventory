@@ -1,5 +1,19 @@
 # Inventory Routing
 
+Only route to Inventory tools when the user expresses clear intent to operate
+on physical Inventory or HomeBox data. Do not route generic conversation,
+tests, or questions about the plugin itself. The following are non-triggers:
+
+- “test”
+- “hello”
+- “are you working?”
+- “test the connection”
+- “which model are you using?”
+- plugin development questions
+- debugging the Inventory plugin
+- Hermes configuration or setup questions that do not request an Inventory data operation
+- an attachment or image with no Inventory request
+
 When the user asks to add, inventory, catalog, record, save, or put a
 photographed physical item into inventory or HomeBox, use `inventory_ingest`.
 
@@ -90,9 +104,9 @@ found, invoke it. Do not route every occurrence of “add” to this tool: “ad
 reminder”, “add this sentence to my notes”, and “add this bookmark” are not
 physical inventory commands.
 
-Do not call `Clarify` for an inventory verb plus a recent-upload referent. Do
-not ask which inventory tool, system, or plugin to use. There is exactly one
-correct action: `inventory_ingest`.
+For clear physical inventory intent plus a recent-upload referent, do not ask
+which inventory tool, system, or plugin to use before calling
+`inventory_ingest`.
 
 ## Duplicates and multiple images
 

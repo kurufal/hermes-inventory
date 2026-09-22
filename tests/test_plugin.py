@@ -273,12 +273,12 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				del args, kwargs
 
 			def register_tool(self, **kwargs):
-				registrations.update(kwargs)
+				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
 		with patch.object(self.plugin, "start_pending_upload_watcher"):
 			self.plugin.register(FakeContext())
-		schema = registrations["schema"]
+		schema = registrations["inventory_ingest"]["schema"]
 		properties = schema["parameters"]["properties"]
 
 		self.assertNotIn("required", schema["parameters"])
@@ -300,7 +300,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				del args, kwargs
 
 			def register_tool(self, **kwargs):
-				registrations["tool"] = kwargs
+				registrations.setdefault("tools", {})[kwargs["name"]] = kwargs
 
 			def register_command(self, **kwargs):
 				registrations["command"] = kwargs
@@ -318,7 +318,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			self.plugin.register(FakeContext())
 		self.assertEqual(registrations["command"]["name"], "inventory")
 		self.assertEqual(registrations["cli"]["name"], "inventory")
-		self.assertNotIn("requires_env", registrations["tool"])
+		self.assertNotIn("requires_env", registrations["tools"]["inventory_ingest"])
 		parser = argparse.ArgumentParser()
 		registrations["cli"]["setup_fn"](parser)
 		namespace = parser.parse_args(["setup", "--secrets"])
@@ -326,10 +326,10 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			self.assertEqual(registrations["cli"]["handler_fn"](namespace), "ok")
 		cli.assert_called_once_with(["setup", "--secrets"])
 		with patch.object(self.plugin, "inventory_ingest", return_value="handled") as handler:
-			self.assertEqual(registrations["tool"]["handler"]({"image_paths": ["C:/photo.jpg"]}), "handled")
+			self.assertEqual(registrations["tools"]["inventory_ingest"]["handler"]({"image_paths": ["C:/photo.jpg"]}), "handled")
 		handler.assert_called_once_with(["C:/photo.jpg"], "fake-llm", use_pending_upload=False)
 
-	def test_tool_description_contains_natural_language_routing_triggers(self):
+	def test_registers_all_inventory_tools_by_name(self):
 		registrations = {}
 
 		class FakeContext:
@@ -342,31 +342,82 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				del args, kwargs
 
 			def register_tool(self, **kwargs):
-				registrations.update(kwargs)
+				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
 		with patch.object(self.plugin, "start_pending_upload_watcher"):
 			self.plugin.register(FakeContext())
 
-		description = registrations["schema"]["description"].lower()
+		self.assertEqual(
+			set(registrations),
+			{"inventory_ingest", "inventory_search", "inventory_update"},
+		)
+
+	def test_manifest_provides_tools_matches_registered_tool_names(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_tool(self, **kwargs):
+				registrations[kwargs["name"]] = kwargs
+				return {"registered": True}
+
+		with patch.object(self.plugin, "start_pending_upload_watcher"):
+			self.plugin.register(FakeContext())
+
+		manifest = (PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+		provided_line = next(line for line in manifest.splitlines() if line.startswith("provides_tools:"))
+		provided_tools = {
+			name.strip() for name in provided_line.partition("[")[2].rstrip("]").split(",")
+		}
+		self.assertEqual(provided_tools, set(registrations))
+
+	def test_ingest_description_has_conservative_eligibility_and_clear_intent(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_tool(self, **kwargs):
+				registrations[kwargs["name"]] = kwargs
+				return {"registered": True}
+
+		with patch.object(self.plugin, "start_pending_upload_watcher"):
+			self.plugin.register(FakeContext())
+
+		description = registrations["inventory_ingest"]["schema"]["description"].lower()
+		self.assertEqual(description, registrations["inventory_ingest"]["description"].lower())
+		for phrase in (
+			"add this to my inventory",
+			"generic tests",
+			"connection or model checks",
+			"development or debugging questions",
+			"unrelated requests",
+			"image, attachment, pending upload, or recent upload without an inventory request",
+			"use_pending_upload=true",
+			"do not call generic vision analysis first",
+		):
+			self.assertIn(phrase, description)
 		for phrase in (
 			"mandatory tool",
 			"call me first",
-			"add this to my inventory",
-			"add this item to my inventory",
-			"inventory this",
-			"catalog this",
-			"add this to homebox",
-			"add the item i just uploaded",
+			"only correct action",
+			"actually invoke the tool",
 		):
-			self.assertIn(phrase, description)
-		self.assertIn("do not ask the user for the item name", description)
-		self.assertIn("do not ask the user what kind of inventory they mean", description)
-		self.assertIn("do not call vision_analyze first", description)
-		self.assertIn("use_pending_upload=true", description)
-		self.assertIn("do not ask for confirmation before calling", description)
-		self.assertIn("actually invoke the tool", description)
-		self.assertIn("do not call\nclarify".replace("\n", " "), description)
+			self.assertNotIn(phrase, description)
 
 	def test_inventory_skill_is_a_concise_routing_skill(self):
 		skill = (
@@ -387,7 +438,16 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn("what kind of inventory?", skill)
 		self.assertIn("use_pending_upload", skill)
 		self.assertIn("do not call `vision_analyze` first", skill)
-		self.assertIn("do not call `clarify`", skill)
+		for phrase in (
+			"only route to inventory tools when the user expresses clear intent",
+			"“test”",
+			"“test the connection”",
+			"“which model are you using?”",
+			"plugin development questions",
+			"debugging the inventory plugin",
+			"attachment or image with no inventory request",
+		):
+			self.assertIn(phrase, skill)
 
 
 if __name__ == "__main__":
