@@ -356,7 +356,13 @@ def _adopted_manifest(entity, inventory_id):
 
 def build_plan(report):
 	"""Build deterministic local-only actions from a completed reconciliation scan."""
-	actions, skipped = [], []
+	actions, skipped, manifest_actions = [], [], {}
+	def add_manifest_update(item, reason, entity_id=None):
+		action = manifest_actions.setdefault(item["path"], {"type": "update_manifest", "path": item["path"], "inventory_id": item["inventory_id"], "reasons": []})
+		if reason not in action["reasons"]:
+			action["reasons"].append(reason)
+		if entity_id is not None:
+			action["entity_id"] = entity_id
 	if not report["homebox"]["complete"]:
 		return {"actions": [], "skipped": [{"reason": "homebox_incomplete"}], "fingerprint": _fingerprint([])}
 	canonical_ids = {item["inventory_id"] for item in report["canonical"]["valid_items"]}
@@ -377,9 +383,9 @@ def build_plan(report):
 			blocked_entities.add(str(entity.get("entity_id")))
 	for item in report["canonical"]["valid_items"]:
 		if item["manifest"].get("schema_version") != SCHEMA_VERSION:
-			actions.append({"type": "upgrade_manifest", "path": item["path"], "inventory_id": item["inventory_id"]})
+			add_manifest_update(item, "upgrade_schema")
 		if any(isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: ") for tag in item["manifest"].get("tags", [])):
-			actions.append({"type": "normalize_system_type_tags", "path": item["path"], "inventory_id": item["inventory_id"]})
+			add_manifest_update(item, "normalize_system_type_tags")
 	# Legacy originals are authoritative local evidence and claim a matched entity
 	# before HomeBox-only adoption is considered.
 	for legacy in report["legacy"]["legacy_candidates"]:
@@ -407,7 +413,7 @@ def build_plan(report):
 	for entry in report["matches"]["represented_in_both"]:
 		item = next(item for item in report["canonical"]["valid_items"] if item["inventory_id"] == entry["inventory_id"])
 		if not item.get("homebox_entity_id") and str(entry["entity_id"]) not in blocked_entities and item["inventory_id"] not in blocked_inventory_ids and item["asset_id"] not in blocked_assets:
-			actions.append({"type": "link_homebox", "path": item["path"], "inventory_id": entry["inventory_id"], "entity_id": entry["entity_id"]})
+			add_manifest_update(item, "link_homebox", entry["entity_id"])
 	for entity in report["homebox"]["items"]:
 		entity_id = str(entity.get("entity_id"))
 		if entity_id in entity_ids or entity_id in blocked_entities:
@@ -422,6 +428,7 @@ def build_plan(report):
 	for reservation in report["reservations"]["entries"]:
 		if reservation.get("classification") == "stale_orphaned_reservation":
 			actions.append({"type": "cleanup_stale_reservation", "path": reservation["path"], "asset_id": reservation["asset_id"], "reservation_id": reservation["reservation_id"]})
+	actions = [*manifest_actions.values(), *actions]
 	for action in actions:
 		action["precondition"] = _action_precondition(action, report)
 	return {"actions": actions, "skipped": skipped, "fingerprint": _fingerprint(actions)}
@@ -449,14 +456,13 @@ def _identity_snapshot(entity):
 def _action_precondition(action, report):
 	"""Digest only evidence an action is allowed to mutate or depend on."""
 	payload = {"type": action["type"]}
-	if action["type"] in {"upgrade_manifest", "link_homebox"}:
+	if action["type"] == "update_manifest":
 		payload["manifest"] = _path_digest(action["path"])
 		payload["entity_id"] = action.get("entity_id")
-	if action["type"] == "link_homebox":
+		payload["reasons"] = action["reasons"]
+	if action["type"] == "update_manifest" and "link_homebox" in action["reasons"]:
 		entity = next((entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == str(action["entity_id"])), None)
 		payload["identity"] = _identity_snapshot(entity or {})
-	if action["type"] == "normalize_system_type_tags":
-		payload["manifest"] = _path_digest(action["path"])
 	if action["type"] == "adopt_homebox":
 		payload["entity"] = next((entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == str(action["entity_id"])), None)
 		payload["destination_exists"] = any(item["inventory_id"] == action["inventory_id"] for item in report["canonical"]["valid_items"])
@@ -482,22 +488,18 @@ def _fingerprint(actions):
 def _apply_action(action, report, settings, *, live_homebox=False):
 	if action.get("precondition") != _action_precondition(action, report):
 		raise RuntimeError(f"Refresh precondition changed for {action['type']}")
-	if live_homebox and action["type"] in {"link_homebox", "adopt_homebox", "migrate_legacy"} and action.get("entity_id"):
+	if live_homebox and (action["type"] in {"adopt_homebox", "migrate_legacy"} or (action["type"] == "update_manifest" and "link_homebox" in action["reasons"])) and action.get("entity_id"):
 		from inventory.homebox import get_entity
 		planned = next((entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == str(action["entity_id"])), None)
 		if planned is None or _identity_snapshot(get_entity(action["entity_id"])) != _identity_snapshot(planned):
 			raise RuntimeError("HomeBox identity changed during refresh")
-	if action["type"] == "upgrade_manifest":
-		path = Path(action["path"])
-		atomic_json_write(path, upgrade_manifest_schema(_read_json(path)))
-	elif action["type"] == "link_homebox":
-		path = Path(action["path"]); manifest = upgrade_manifest_schema(_read_json(path))
-		manifest.setdefault("homebox", {})["entity_id"] = action["entity_id"]
-		atomic_json_write(path, manifest)
-	elif action["type"] == "normalize_system_type_tags":
+	if action["type"] == "update_manifest":
 		path = Path(action["path"])
 		manifest = upgrade_manifest_schema(_read_json(path))
-		manifest["tags"] = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
+		if "normalize_system_type_tags" in action["reasons"]:
+			manifest["tags"] = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
+		if "link_homebox" in action["reasons"]:
+			manifest.setdefault("homebox", {})["entity_id"] = action["entity_id"]
 		atomic_json_write(path, manifest)
 	elif action["type"] == "cleanup_stale_reservation":
 		path = Path(action["path"])

@@ -190,14 +190,15 @@ class RefreshTests(unittest.TestCase):
 		payload["tags"] = [{"name": "Type: Book", "source": "system"}, {"name": "Type: Personal", "source": "user"}]
 		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
 		report = refresh(settings=self.settings, homebox_entities=[])
-		action = next(action for action in build_plan(report)["actions"] if action["type"] == "normalize_system_type_tags")
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "update_manifest")
+		self.assertEqual(action["reasons"], ["upgrade_schema", "normalize_system_type_tags"])
 		_apply_action(action, report, self.settings)
 		self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tags"], [{"name": "Type: Personal", "source": "user"}])
 
 	def test_link_precondition_includes_homebox_identity_evidence(self):
 		self.write_item(identifiers={"serial_number": ["SER-1"]})
 		report = refresh(settings=self.settings, homebox_entities=[entity("one", "000-001", [{"name": "Serial Number", "textValue": "SER-1"}])])
-		action = next(action for action in build_plan(report)["actions"] if action["type"] == "link_homebox")
+		action = next(action for action in build_plan(report)["actions"] if action.get("reasons") == ["upgrade_schema", "link_homebox"])
 		changed = {**report, "homebox": {**report["homebox"], "items": [{**report["homebox"]["items"][0], "fields": [{"name": "Serial Number", "textValue": "DIFFERENT"}]}]}}
 		with self.assertRaisesRegex(RuntimeError, "precondition"):
 			_apply_action(action, changed, self.settings)
@@ -304,10 +305,67 @@ class RefreshTests(unittest.TestCase):
 	def test_live_link_revalidates_current_homebox_identity(self):
 		self.write_item(identifiers={"serial_number": ["SER-1"]})
 		report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-001", [{"name": "Serial Number", "textValue": "SER-1"}])])
-		action = next(action for action in build_plan(report)["actions"] if action["type"] == "link_homebox")
+		action = next(action for action in build_plan(report)["actions"] if "link_homebox" in action.get("reasons", []))
 		with patch("inventory.homebox.get_entity", return_value=entity("hb-1", "000-001", [{"name": "Serial Number", "textValue": "changed"}])):
 			with self.assertRaisesRegex(RuntimeError, "HomeBox identity changed"):
 				_apply_action(action, report, self.settings, live_homebox=True)
+
+	def test_apply_coalesces_upgrade_and_system_type_tag_normalization_once(self):
+		payload = self.write_item()
+		payload["tags"] = [{"name": "Type: Book", "source": "system"}, {"name": "Keep", "source": "user"}]
+		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=[]))
+		self.assertEqual([(action["type"], action["reasons"]) for action in plan["actions"]], [("update_manifest", ["upgrade_schema", "normalize_system_type_tags"])])
+		result = apply_refresh(settings=self.settings, homebox_entities=[])
+		self.assertNotEqual(result["status"], "ERROR")
+		self.assertEqual(result["backup_verification"]["status"], "PASS")
+		manifest = json.loads(path.read_text(encoding="utf-8"))
+		self.assertEqual(manifest["schema_version"], 3)
+		self.assertEqual(manifest["tags"], [{"name": "Keep", "source": "user"}])
+		self.assertTrue((self.root / "catalog.json").is_file())
+		self.assertEqual(apply_refresh(settings=self.settings, homebox_entities=[])["applied"], [])
+
+	def test_apply_composes_all_compatible_manifest_mutations(self):
+		payload = self.write_item()
+		payload["tags"] = [{"name": "Type: Book", "source": "system"}]
+		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+		entities = [entity("hb-1", "000-001", [{"name": "Inventory Item ID", "textValue": "INV-1"}])]
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=entities))
+		self.assertEqual([(action["type"], action["reasons"]) for action in plan["actions"]], [("update_manifest", ["upgrade_schema", "normalize_system_type_tags", "link_homebox"])])
+		result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(result["status"], "PASS")
+		manifest = json.loads(path.read_text(encoding="utf-8"))
+		self.assertEqual(manifest["schema_version"], 3)
+		self.assertEqual(manifest["tags"], [])
+		self.assertEqual(manifest["homebox"]["entity_id"], "hb-1")
+		self.assertEqual(apply_refresh(settings=self.settings, homebox_entities=entities)["applied"], [])
+
+	def test_partially_upgraded_manifest_plans_only_remaining_tag_cleanup(self):
+		payload = self.write_item()
+		payload["schema_version"] = 3
+		payload["tags"] = [{"name": "Type: Book", "source": "system"}]
+		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+		plan = build_plan(refresh(settings=self.settings, homebox_entities=[]))
+		self.assertEqual([(action["type"], action["reasons"]) for action in plan["actions"]], [("update_manifest", ["normalize_system_type_tags"])])
+		result = apply_refresh(settings=self.settings, homebox_entities=[])
+		self.assertNotEqual(result["status"], "ERROR")
+		self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tags"], [])
+
+	def test_external_manifest_change_fails_closed_before_coalesced_write(self):
+		payload = self.write_item(); payload["tags"] = [{"name": "Type: Book", "source": "system"}]
+		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+		original_apply = _apply_action
+		def externally_change_then_apply(action, report, settings, **kwargs):
+			external = json.loads(path.read_text(encoding="utf-8")); external["item"]["name"] = "External edit"; path.write_text(json.dumps(external), encoding="utf-8")
+			return original_apply(action, report, settings, **kwargs)
+		with patch("inventory.refresh._apply_action", side_effect=externally_change_then_apply):
+			result = apply_refresh(settings=self.settings, homebox_entities=[])
+		self.assertEqual(result["status"], "ERROR")
+		self.assertEqual(result["applied"], [])
+		self.assertIn("precondition changed", result["failed"]["error"])
+		manifest = json.loads(path.read_text(encoding="utf-8"))
+		self.assertEqual(manifest["item"]["name"], "External edit")
+		self.assertEqual(manifest["schema_version"], 2)
 
 
 class HomeBoxPaginationTests(unittest.TestCase):
