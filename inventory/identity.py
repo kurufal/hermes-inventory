@@ -1,7 +1,5 @@
 """Pure, conservative identity comparison for Inventory reconciliation."""
 
-from collections import defaultdict
-
 
 PRODUCT_FIELDS = {
 	"isbn_10": "ISBN-10",
@@ -64,11 +62,16 @@ def match_manifest(manifest, entities):
 		("image_sha256", candidates(lambda entity: hashes & entity_field_values(entity, "Image SHA-256"))),
 		("serial_number", candidates(lambda entity: serials & entity_identifiers(entity).get("serial_number", set()))),
 	]
-	for kind, matches in checks:
-		if len(matches) == 1:
-			return {"classification": "strong_match", "kind": kind, "entity": matches[0], "candidates": []}
-		if len(matches) > 1:
-			return {"classification": "ambiguous", "kind": kind, "entity": None, "candidates": matches}
+	evidence = [{"kind": kind, "entity_ids": sorted(str(entity["id"]) for entity in matches)} for kind, matches in checks if matches]
+	if any(len(entry["entity_ids"]) > 1 for entry in evidence):
+		return {"classification": "ambiguous", "kind": "strong_identity", "entity": None, "candidates": [entity for _, matches in checks for entity in matches], "evidence": evidence}
+	strong_ids = {entry["entity_ids"][0] for entry in evidence}
+	if len(strong_ids) > 1:
+		return {"classification": "conflict", "kind": "strong_identity", "entity": None, "candidates": [entity for _, matches in checks for entity in matches], "evidence": evidence}
+	if len(strong_ids) == 1:
+		entity_id = next(iter(strong_ids))
+		entity = next(entity for entity in entities if str(entity["id"]) == entity_id)
+		return {"classification": "strong_match", "kind": evidence[0]["kind"], "entity": entity, "candidates": [], "evidence": evidence}
 
 	product_matches = []
 	for key, values in product_ids.items():
@@ -78,5 +81,5 @@ def match_manifest(manifest, entities):
 			product_matches.append(entity)
 	if product_matches:
 		by_id = {str(entity["id"]): entity for entity in product_matches}
-		return {"classification": "candidate", "kind": "product_identifier", "entity": None, "candidates": [by_id[key] for key in sorted(by_id)]}
-	return {"classification": "unmatched", "kind": None, "entity": None, "candidates": []}
+		return {"classification": "candidate", "kind": "product_identifier", "entity": None, "candidates": [by_id[key] for key in sorted(by_id)], "evidence": []}
+	return {"classification": "unmatched", "kind": None, "entity": None, "candidates": [], "evidence": []}

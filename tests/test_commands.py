@@ -21,8 +21,8 @@ class InventoryCommandTests(unittest.TestCase):
 	def test_refresh_and_dry_run_are_read_only_preview(self):
 		preview = {"canonical": {"valid_items": []}, "legacy": {"legacy_candidates": []}, "homebox": {"items": [], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
 		with tempfile.TemporaryDirectory() as temporary_directory:
-			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True), patch("inventory.refresh.refresh", return_value=preview) as scanner:
-				result = inventory_command("refresh")
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True), patch("inventory.refresh.refresh", return_value=preview) as scanner, patch("inventory.refresh.apply_refresh", return_value={"report": preview, "applied": [], "backup": None}):
+				result = inventory_command("refresh --dry-run")
 				dry_run = inventory_command("refresh --dry-run")
 		self.assertIn("Mode: READ-ONLY PREVIEW", result)
 		self.assertIn("No changes were made.", dry_run)

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from inventory.config import get_settings
-from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION
+from inventory.constants import CATALOG_SCHEMA, ITEM_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS
 from inventory.media import mime_type
 from inventory.hashing import sha256_file
 
@@ -30,7 +30,7 @@ def format_asset_id(number: int) -> str:
 	return f"{text[:3]}-{text[3:]}"
 
 
-def allocate_asset_id(settings, requested: str | None = None) -> str:
+def reserve_asset_id(settings, requested: str | None = None, external_used_ids=()) -> tuple[str, str]:
 	with _ASSET_LOCK:
 		used = set()
 		for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
@@ -43,12 +43,14 @@ def allocate_asset_id(settings, requested: str | None = None) -> str:
 		reservations = settings.persistent_data_dir / ".asset-id-reservations"
 		reservations.mkdir(parents=True, exist_ok=True)
 		used.update(path.stem for path in reservations.glob("*.json") if _ASSET_RE.fullmatch(path.stem))
+		used.update(str(asset_id) for asset_id in external_used_ids if _ASSET_RE.fullmatch(str(asset_id)))
 		def reserve(candidate):
+			reservation_id = uuid.uuid4().hex
 			try:
 				fd = os.open(reservations / f"{candidate}.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY)
 				with os.fdopen(fd, "w", encoding="utf-8") as handle:
-					json.dump({"asset_id": candidate, "reserved_at": _timestamp()}, handle)
-				return candidate
+					json.dump({"asset_id": candidate, "reservation_id": reservation_id, "reserved_at": _timestamp()}, handle)
+				return candidate, reservation_id
 			except FileExistsError:
 				return None
 		if requested:
@@ -67,6 +69,24 @@ def allocate_asset_id(settings, requested: str | None = None) -> str:
 				if reserved:
 					return reserved
 		raise RuntimeError("No Asset IDs remain")
+
+
+def allocate_asset_id(settings, requested: str | None = None, external_used_ids=()) -> str:
+	"""Compatibility allocation API; callers that need cleanup use reserve_asset_id."""
+	return reserve_asset_id(settings, requested, external_used_ids)[0]
+
+
+def release_asset_id_reservation(settings, asset_id: str, reservation_id: str) -> bool:
+	"""Release only the reservation created by this operation."""
+	path = settings.persistent_data_dir / ".asset-id-reservations" / f"{asset_id}.json"
+	try:
+		payload = json.loads(path.read_text(encoding="utf-8"))
+		if payload.get("reservation_id") != reservation_id:
+			return False
+		path.unlink()
+		return True
+	except (OSError, json.JSONDecodeError, AttributeError):
+		return False
 
 
 def _slug(value: str, limit: int) -> str:
@@ -175,10 +195,12 @@ def atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 		raise
 
 
-def migrate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-	"""Fill additive v2 fields only when a canonical item is safely loaded."""
+def upgrade_manifest_schema(manifest: dict[str, Any]) -> dict[str, Any]:
+	"""Upgrade a supported canonical manifest in memory without fabricating evidence."""
 	if manifest.get("schema") != ITEM_SCHEMA:
 		raise ValueError("Not an Inventory item manifest")
+	if manifest.get("schema_version") not in SUPPORTED_ITEM_SCHEMA_VERSIONS:
+		raise ValueError("Unsupported Inventory item schema version")
 	manifest.setdefault("field_sources", {})
 	manifest.setdefault("history", [])
 	manifest.setdefault("tags", [])
@@ -192,8 +214,29 @@ def migrate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 		image.setdefault("original_filename", image.get("source_filename", filename))
 		image.setdefault("source_filename", image["original_filename"])
 		image.setdefault("role", "other")
+	provenance = manifest.get("provenance")
+	if not isinstance(provenance, dict):
+		provenance = {}
+	if "origin" not in provenance:
+		provenance["origin"] = "native_ingest" if manifest.get("images") else "legacy_migration"
+	if "local_originals" not in provenance:
+		provenance["local_originals"] = bool(manifest.get("images"))
+	provenance.setdefault("sources", [])
+	manifest["provenance"] = provenance
+	vision = manifest.get("vision")
+	if not isinstance(vision, dict):
+		vision = {}
+	if not provenance["local_originals"] and not manifest.get("images"):
+		vision.setdefault("raw_metadata_relative_path", None)
+		vision.setdefault("parse_status", "not_applicable")
+	else:
+		vision.setdefault("raw_metadata_relative_path", "vision.json")
+	manifest["vision"] = vision
 	manifest["schema_version"] = SCHEMA_VERSION
 	return manifest
+
+
+migrate_manifest = upgrade_manifest_schema
 
 
 def item_directory(item_id: str, settings=None) -> Path:
@@ -213,8 +256,12 @@ def commit_item_transaction(transaction: Path, item_id: str, settings) -> Path:
 	final = item_directory(item_id, settings)
 	if final.exists():
 		raise FileExistsError(f"Inventory item already exists: {final}")
-	if not (transaction / "item.json").is_file() or not (transaction / "vision.json").is_file():
+	if not (transaction / "item.json").is_file():
 		raise RuntimeError("Incomplete inventory transaction cannot be committed.")
+	manifest = json.loads((transaction / "item.json").read_text(encoding="utf-8"))
+	upgraded = upgrade_manifest_schema(manifest)
+	if upgraded.get("provenance", {}).get("local_originals") and not (transaction / "vision.json").is_file():
+		raise RuntimeError("Photographed inventory transactions require vision.json.")
 	os.replace(transaction, final)
 	return final
 
@@ -263,6 +310,7 @@ def build_manifest(item_id: str, record: dict[str, Any], raw_metadata: dict[str,
 		"images": _image_entries(record, image_dir),
 		"homebox": homebox or previous.get("homebox", {"entity_id": None, "asset_id": None, "collection_id": None, "entity_type": None, "last_synced_at": None}),
 		"vision": {"raw_metadata_relative_path": "vision.json", "parse_status": raw_metadata.get("parse_status")},
+		"provenance": previous.get("provenance", {"origin": "native_ingest", "local_originals": True, "sources": []}),
 		"error": error,
 		"field_sources": previous.get("field_sources", record.get("field_sources", {})),
 		"history": previous.get("history", []),
@@ -294,13 +342,13 @@ def write_catalog(settings=None) -> Path:
 		except (OSError, json.JSONDecodeError):
 			corrupt.append(str(candidate))
 			continue
-		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in {1, SCHEMA_VERSION}:
+		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in SUPPORTED_ITEM_SCHEMA_VERSIONS:
 			corrupt.append(str(candidate))
 			continue
 	if corrupt:
 		raise RuntimeError("Catalog was not replaced because item manifests are invalid: " + ", ".join(corrupt))
 	for candidate in sorted(settings.items_dir.glob("*/item.json")) if settings.items_dir.exists() else []:
-		manifest = migrate_manifest(json.loads(candidate.read_text(encoding="utf-8")))
+		manifest = upgrade_manifest_schema(json.loads(candidate.read_text(encoding="utf-8")))
 		item = manifest.get("item", {})
 		images = manifest.get("images", [])
 		items.append({"inventory_id": manifest.get("inventory_id"), "asset_id": manifest.get("asset_id"), "name": item.get("name"), "category": item.get("category"), "manufacturer": item.get("manufacturer"), "identifiers": manifest.get("identifiers", {}), "quantity": item.get("quantity", 1), "preview_image_relative_path": images[0].get("relative_path") if images else None, "homebox_entity_id": manifest.get("homebox", {}).get("entity_id"), "status": manifest.get("status"), "updated_at": manifest.get("updated_at")})

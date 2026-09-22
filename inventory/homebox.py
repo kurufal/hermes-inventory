@@ -116,7 +116,12 @@ def list_all_entities(*, max_pages=1000, page_size=100):
 				entities.append(entity)
 				new_count += 1
 		if isinstance(payload, list):
-			return entities
+			if len(page_items) < page_size:
+				return entities
+			if not new_count:
+				raise HomeBoxEnumerationError("HomeBox entity enumeration repeated a bare page", entities)
+			page += 1
+			continue
 		total_pages = _positive_int(metadata.get("totalPages") or metadata.get("total_pages"))
 		next_page = _positive_int(metadata.get("nextPage") or metadata.get("next_page"))
 		current_page = _positive_int(metadata.get("page") or metadata.get("currentPage")) or page

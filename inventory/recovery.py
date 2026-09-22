@@ -6,8 +6,9 @@ from pathlib import Path
 
 from inventory.config import get_settings
 from inventory.hashing import sha256_file
-from inventory.storage import ITEM_SCHEMA, SCHEMA_VERSION
-from inventory.constants import CATALOG_SCHEMA, OBSERVATION_SCHEMA
+from inventory.storage import ITEM_SCHEMA
+from inventory.constants import CATALOG_SCHEMA, OBSERVATION_SCHEMA, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
+from inventory.identity import match_manifest
 
 
 def _safe_item_path(item_root: Path, relative_path: str) -> Path | None:
@@ -31,7 +32,7 @@ def scan() -> dict:
 	for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
 		try:
 			manifest = json.loads(path.read_text(encoding="utf-8"))
-			if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in {1, SCHEMA_VERSION}:
+			if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in SUPPORTED_ITEM_SCHEMA_VERSIONS:
 				report["unsupported_schema_versions"].append(str(path))
 				continue
 		except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -83,7 +84,7 @@ def scan() -> dict:
 			except (OSError, json.JSONDecodeError):
 				report["malformed_observations"].append(str(path))
 				continue
-			if observation.get("schema") == OBSERVATION_SCHEMA and observation.get("schema_version") == SCHEMA_VERSION:
+			if observation.get("schema") == OBSERVATION_SCHEMA and observation.get("schema_version") in SUPPORTED_OBSERVATION_SCHEMA_VERSIONS:
 				continue
 			if observation.get("schema"):
 				report["legacy_observations"].append(str(path))
@@ -105,31 +106,10 @@ def plan(*, settings=None, homebox_entities=None) -> dict:
 		except Exception as exc:
 			return {**report, "homebox": f"unavailable: {type(exc).__name__}: {exc}"}
 	by_id = {str(entity.get("id")): entity for entity in homebox_entities if isinstance(entity, dict) and entity.get("id")}
-	def field_values(entity, name):
-		values = []
-		for field in entity.get("fields", []):
-			if isinstance(field, dict) and field.get("name") == name:
-				values.extend(str(field.get(key, "")) for key in ("textValue", "numberValue") if field.get(key) is not None)
-		return {value.strip().casefold() for value in values if value.strip()}
 	def matched_by_identity(manifest):
-		inventory_id = str(manifest.get("inventory_id", "")).casefold()
-		for entity in homebox_entities:
-			if inventory_id and inventory_id in field_values(entity, "Inventory Item ID"):
-				return entity, "inventory_id"
-		old_id = str(manifest.get("homebox", {}).get("entity_id") or "")
-		if old_id in by_id:
-			return by_id[old_id], "entity_id"
-		hashes = {str(image.get("sha256", "")).casefold() for image in manifest.get("images", []) if image.get("sha256")}
-		for entity in homebox_entities:
-			if hashes & field_values(entity, "Image SHA-256"):
-				return entity, "image_hash"
-		field_names = {"isbn_13": "ISBN-13", "isbn_10": "ISBN-10", "upc": "UPC", "ean": "EAN", "barcode_text": "Barcode", "serial_number": "Serial Number"}
-		for key, field_name in field_names.items():
-			values = {str(value).casefold() for value in manifest.get("identifiers", {}).get(key, []) if str(value)}
-			matches = [entity for entity in homebox_entities if values & field_values(entity, field_name)]
-			if len(matches) == 1:
-				return matches[0], field_name
-		return None, None
+		match = match_manifest(manifest, homebox_entities)
+		kind = "entity_id" if match.get("kind") == "stored_entity_id" else match.get("kind")
+		return match.get("entity"), kind
 	for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
 		try:
 			manifest = json.loads(path.read_text(encoding="utf-8"))

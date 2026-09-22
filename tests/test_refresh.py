@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from inventory.homebox import HomeBoxEnumerationError, list_all_entities
-from inventory.refresh import refresh
+from inventory.refresh import apply_refresh, build_plan, refresh
 
 
 def entity(entity_id, asset_id="", fields=None, name="Item"):
@@ -17,7 +17,7 @@ class RefreshTests(unittest.TestCase):
 	def setUp(self):
 		self.temporary_directory = tempfile.TemporaryDirectory()
 		self.root = Path(self.temporary_directory.name) / "inventory"
-		self.settings = SimpleNamespace(persistent_data_dir=self.root, runtime_dir=self.root.parent / "runtime", items_dir=self.root / "items")
+		self.settings = SimpleNamespace(persistent_data_dir=self.root, runtime_dir=self.root.parent / "runtime", items_dir=self.root / "items", backup_dir=self.root / "backups")
 
 	def tearDown(self):
 		self.temporary_directory.cleanup()
@@ -122,6 +122,48 @@ class RefreshTests(unittest.TestCase):
 		after = {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
 		self.assertEqual(after, before)
 
+	def test_apply_adopts_homebox_item_once_with_verified_backup(self):
+		entities = [entity("homebox-1", "000-010", [{"name": "Serial Number", "textValue": "SER-1"}], "Adopted")]
+		result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(result["backup_verification"]["status"], "PASS")
+		self.assertEqual([action["type"] for action in result["applied"]], ["adopt_homebox"])
+		manifest_path = next(self.settings.items_dir.glob("*/item.json"))
+		manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+		self.assertEqual(manifest["homebox"]["entity_id"], "homebox-1")
+		self.assertEqual(manifest["asset_id"], "000-010")
+		self.assertFalse(manifest["provenance"]["local_originals"])
+		self.assertEqual(manifest["images"], [])
+		self.assertFalse((manifest_path.parent / "vision.json").exists())
+		repeated = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(repeated["applied"], [])
+
+	def test_apply_aborts_when_backup_fails_or_plan_changes(self):
+		entities = [entity("homebox-1", "000-010")]
+		with patch("inventory.backup.create_backup", return_value={"path": str(self.root / "missing.zip")}), patch("inventory.backup.verify_backup", return_value={"status": "FAIL"}):
+			result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(result["status"], "ERROR")
+		self.assertFalse(self.settings.items_dir.exists())
+		first = refresh(settings=self.settings, homebox_entities=entities)
+		second = {**first, "homebox": {**first["homebox"], "complete": False}}
+		with patch("inventory.refresh.refresh", side_effect=[first, second]):
+			result = apply_refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(result["skipped"][0]["reason"], "state_changed_during_refresh")
+
+	def test_strong_identity_conflict_is_not_adopted(self):
+		self.write_item(entity_id="one")
+		entities = [entity("one", "000-001"), entity("two", "000-001", [{"name": "Inventory Item ID", "textValue": "INV-1"}])]
+		report = refresh(settings=self.settings, homebox_entities=entities)
+		self.assertEqual(report["matches"]["conflicts"][0]["type"], "strong_identity_conflict")
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox"])
+
+	def test_legacy_original_images_are_reported_without_migration_guess(self):
+		image = self.root / "originals" / "INV-old" / "cover.jpg"
+		image.parent.mkdir(parents=True)
+		image.write_bytes(b"cover")
+		report = refresh(settings=self.settings, homebox_entities=[])
+		self.assertEqual(report["legacy"]["orphaned_evidence"][0]["filename"], "cover.jpg")
+		self.assertTrue(image.exists())
+
 
 class HomeBoxPaginationTests(unittest.TestCase):
 	def response(self, payload):
@@ -140,3 +182,13 @@ class HomeBoxPaginationTests(unittest.TestCase):
 	def test_pagination_returns_all_items_with_get_only(self):
 		with patch("inventory.homebox._base_url", return_value="http://homebox"), patch("inventory.homebox.auth_headers", return_value={}), patch("inventory.homebox.requests.get", side_effect=[self.response({"items": [entity("one")], "pagination": {"page": 1, "totalPages": 2}}), self.response({"items": [entity("two")], "pagination": {"page": 2, "totalPages": 2}})]):
 			self.assertEqual([item["id"] for item in list_all_entities()], ["one", "two"])
+
+	def test_bare_list_pagination_requests_next_page_and_stops_empty(self):
+		with patch("inventory.homebox._base_url", return_value="http://homebox"), patch("inventory.homebox.auth_headers", return_value={}), patch("inventory.homebox.requests.get", side_effect=[self.response([entity("one")]), self.response([])]) as get:
+			self.assertEqual([item["id"] for item in list_all_entities(page_size=1)], ["one"])
+		self.assertEqual(get.call_count, 2)
+
+	def test_bare_list_repeated_page_is_incomplete(self):
+		with patch("inventory.homebox._base_url", return_value="http://homebox"), patch("inventory.homebox.auth_headers", return_value={}), patch("inventory.homebox.requests.get", side_effect=[self.response([entity("one")]), self.response([entity("one")])]):
+			with self.assertRaises(HomeBoxEnumerationError):
+				list_all_entities(page_size=1)

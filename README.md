@@ -142,7 +142,11 @@ Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging 
 
 `/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory refresh`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
 
-`/inventory refresh` (and `/inventory refresh --dry-run`) is a read-only reconciliation preview in this release. It compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records. It reports possible future actions but makes no local or HomeBox changes.
+`/inventory refresh --dry-run` is a read-only reconciliation preview. It compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records.
+
+`/inventory refresh` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, and rebuild the local catalog. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
+
+HomeBox adoption stores the existing HomeBox metadata locally but does not download attachments as immutable originals. Adopted schema-v3 records can therefore have no local images or vision result; local search remains canonical/local. Existing schema-v1 and schema-v2 photographed records remain readable.
 
 ## Updating Items
 

@@ -50,17 +50,17 @@ def _safe_member_name(name: str) -> bool:
 	return not member.is_absolute() and ".." not in member.parts and not (member.parts and ":" in member.parts[0])
 
 
-def create_backup() -> dict:
+def create_backup(settings=None) -> dict:
 	if not _BACKUP_LOCK.acquire(blocking=False):
 		raise RuntimeError("An Inventory backup is already in progress.")
 	try:
-		return _create_backup()
+		return _create_backup(settings=settings)
 	finally:
 		_BACKUP_LOCK.release()
 
 
-def _create_backup() -> dict:
-	settings = get_settings()
+def _create_backup(settings=None) -> dict:
+	settings = settings or get_settings()
 	ok, reason = storage_health(settings.persistent_data_dir)
 	if not ok:
 		raise RuntimeError(f"Persistent inventory storage is unavailable: {reason}")
@@ -94,7 +94,8 @@ def _create_backup() -> dict:
 		raise
 
 
-def verify_backup(path: Path) -> dict:
+def verify_backup(path: Path, settings=None) -> dict:
+	del settings
 	try:
 		with zipfile.ZipFile(path) as archive:
 			names = archive.namelist()
@@ -121,6 +122,6 @@ def verify_backup(path: Path) -> dict:
 		return {"status": "FAIL", "path": str(path), "error": str(exc)}
 
 
-def list_backups() -> list[Path]:
-	backup_dir = get_settings().backup_dir
+def list_backups(settings=None) -> list[Path]:
+	backup_dir = (settings or get_settings()).backup_dir
 	return sorted(backup_dir.glob("hermes-inventory-backup-*.zip"), reverse=True) if backup_dir.exists() else []

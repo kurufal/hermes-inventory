@@ -136,9 +136,8 @@ def _asset_id_available(asset_id, manifest, settings):
 		if candidate.get("inventory_id") != manifest.get("inventory_id") and candidate.get("asset_id") == asset_id:
 			raise ValueError(f"Asset ID is already in use: {asset_id}")
 	try:
-		from inventory.homebox import list_entities
-		response = list_entities()
-		entities = response.get("items", []) if isinstance(response, dict) else response
+		from inventory.homebox import list_all_entities
+		entities = list_all_entities()
 		for entity in entities if isinstance(entities, list) else []:
 			if str(entity.get("assetId", "")) == asset_id and str(entity.get("id")) != str(manifest.get("homebox", {}).get("entity_id")):
 				raise ValueError(f"Asset ID is already in use in HomeBox: {asset_id}")
@@ -166,14 +165,14 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	manifest = migrate_manifest(manifest)
 	root = settings.items_dir / manifest["inventory_id"]
 	images = root / "images"
-	if not manifest.get("asset_id"):
-		manifest["asset_id"] = allocate_asset_id(settings)
 	raw = None
 	if operation == "edit":
 		if "asset_id" in (changes or {}):
 			_asset_id_available(str(changes["asset_id"]), manifest, settings)
 		changes_log = _apply_changes(manifest, changes or {})
 	elif operation == "reanalyze":
+		if not manifest.get("provenance", {}).get("local_originals", bool(manifest.get("images"))):
+			return {"status": "error", "error": "This item has no local image evidence to reanalyze."}
 		old_vision = root / "vision.json"
 		if old_vision.exists():
 			atomic_json_write(root / "history" / f"vision-{_now().replace(':', '')}.json", json.loads(old_vision.read_text(encoding="utf-8")))
@@ -210,7 +209,7 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 		changes_log = {}
 	else:
 		return {"status": "error", "error": "operation must be edit, reanalyze, or resync"}
-	if operation in {"edit", "reanalyze"}:
+	if operation in {"edit", "reanalyze"} and manifest.get("images"):
 		_reconcile_image_names(manifest, images)
 		if raw is not None:
 			raw["source_images"] = [Path(image["relative_path"]).name for image in manifest.get("images", [])]
@@ -232,4 +231,4 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 			manifest["status"] = "pending_homebox_sync"; manifest["error"] = str(exc)
 	write_manifest(manifest, settings=settings)
 	write_catalog(settings)
-	return {"status": "updated", "durable": True, "operation": operation, "asset_id": manifest["asset_id"], "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}
+	return {"status": "updated", "durable": True, "operation": operation, "asset_id": manifest.get("asset_id"), "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}

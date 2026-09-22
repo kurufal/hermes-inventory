@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
 from inventory.config import get_settings
-from inventory.constants import ITEM_SCHEMA, OBSERVATION_SCHEMA, SCHEMA_VERSION
+from inventory.constants import ITEM_SCHEMA, OBSERVATION_SCHEMA, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
 from inventory.hashing import sha256_file
 from inventory.identity import match_manifest
-from inventory.storage import _ASSET_RE
+from inventory.storage import _ASSET_RE, atomic_json_write, begin_item_transaction, build_manifest, canonicalize_images, commit_item_transaction, upgrade_manifest_schema, write_catalog
+from inventory.media import is_supported_image
+from inventory.normalize import normalize_record
 
 
 def _read_json(path):
@@ -46,7 +50,7 @@ def _canonical_scan(settings):
 		if manifest is None:
 			result["corrupt_manifests"].append({"path": str(path)})
 			continue
-		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in {1, SCHEMA_VERSION}:
+		if manifest.get("schema") != ITEM_SCHEMA or manifest.get("schema_version") not in SUPPORTED_ITEM_SCHEMA_VERSIONS:
 			result["unsupported_schema_versions"].append({"path": str(path), "schema": manifest.get("schema"), "schema_version": manifest.get("schema_version")})
 			continue
 		inventory_id = str(manifest.get("inventory_id", ""))
@@ -88,12 +92,22 @@ def _legacy_scan(root, canonical_paths):
 				entry.update({key: payload.get(key) for key in ("inventory_id", "asset_id", "homebox_entity_id", "entity_id", "identifiers", "source_images", "source_directory") if payload.get(key) is not None})
 				entry["hashes"] = payload.get("image_hashes", payload.get("hashes", []))
 			result["legacy_candidates" if payload else "unknown_format"].append(entry)
+	originals = root / "originals"
+	if originals.exists():
+		for path in sorted(originals.rglob("*")):
+			if not path.is_file() or not is_supported_image(path):
+				continue
+			entry = {"path": str(path), "filename": path.name, "size": path.stat().st_size, "sha256": sha256_file(path)}
+			metadata = root / "metadata" / f"{path.parent.name}.json"
+			if metadata.is_file():
+				entry["related_metadata_path"] = str(metadata)
+			result["orphaned_evidence"].append(entry)
 	for directory in (root / "receipts", root / "observations"):
 		if not directory.exists():
 			continue
 		for path in sorted(directory.glob("*.json")):
 			payload = _read_json(path)
-			if directory.name == "observations" and payload and payload.get("schema") == OBSERVATION_SCHEMA and payload.get("schema_version") == SCHEMA_VERSION:
+			if directory.name == "observations" and payload and payload.get("schema") == OBSERVATION_SCHEMA and payload.get("schema_version") in SUPPORTED_OBSERVATION_SCHEMA_VERSIONS:
 				result["current"].append({"path": str(path), "kind": "observation"})
 			elif directory.name == "receipts" and payload:
 				result["current"].append({"path": str(path), "kind": "receipt"})
@@ -191,10 +205,12 @@ def refresh(*, settings=None, homebox_entities=None):
 			homebox_entities = list(getattr(exc, "partial_entities", []))
 			homebox_complete, homebox_error = False, f"{type(exc).__name__}: {exc}"
 	homebox_entities = [entity for entity in homebox_entities if isinstance(entity, dict)]
-	homebox_assets = {str(entity.get("assetId", "")) for entity in homebox_entities if _ASSET_RE.fullmatch(str(entity.get("assetId", "")))}
+	homebox_asset_values = [str(entity.get("assetId", "")) for entity in homebox_entities if entity.get("assetId")]
+	homebox_assets = {asset_id for asset_id in homebox_asset_values if _ASSET_RE.fullmatch(asset_id)}
+	malformed_homebox_assets = sorted(asset_id for asset_id in homebox_asset_values if not _ASSET_RE.fullmatch(asset_id))
 	reservations, unmatched_reservations = _reservation_scan(settings.persistent_data_dir, local_assets, homebox_assets)
 	reserved_assets = {entry["asset_id"] for entry in reservations if entry.get("asset_id")}
-	matches = {"represented_in_both": [], "local_only": [], "homebox_only": [], "ambiguous": []}
+	matches = {"represented_in_both": [], "local_only": [], "homebox_only": [], "ambiguous": [], "conflicts": []}
 	matched_homebox_ids = set()
 	conflicts = []
 	if homebox_complete:
@@ -208,6 +224,10 @@ def refresh(*, settings=None, homebox_entities=None):
 					conflicts.append({"type": "asset_id_mismatch", "inventory_id": item["inventory_id"], "entity_id": entity["id"], "local_asset_id": item["asset_id"], "homebox_asset_id": entity.get("assetId")})
 			elif match["classification"] in {"ambiguous", "candidate"}:
 				matches["ambiguous"].append({"inventory_id": item["inventory_id"], "kind": match["kind"], "entity_ids": [entity["id"] for entity in match["candidates"]]})
+			elif match["classification"] == "conflict":
+				entry = {"type": "strong_identity_conflict", "inventory_id": item["inventory_id"], "evidence": match.get("evidence", [])}
+				matches["conflicts"].append(entry)
+				conflicts.append(entry)
 			else:
 				matches["local_only"].append({"inventory_id": item["inventory_id"], "asset_id": item["asset_id"]})
 		for entity in homebox_entities:
@@ -215,6 +235,15 @@ def refresh(*, settings=None, homebox_entities=None):
 				matches["homebox_only"].append({"entity_id": entity.get("id"), "asset_id": entity.get("assetId"), "name": entity.get("name")})
 	for asset_id in canonical["duplicate_asset_ids"]:
 		conflicts.append({"type": "duplicate_local_asset_id", "asset_id": asset_id})
+	for asset_id, count in Counter(homebox_asset_values).items():
+		if _ASSET_RE.fullmatch(asset_id) and count > 1:
+			conflicts.append({"type": "duplicate_homebox_asset_id", "asset_id": asset_id})
+	for asset_id in malformed_homebox_assets:
+		conflicts.append({"type": "malformed_homebox_asset_id", "asset_id": asset_id})
+	for asset_id in sorted(local_assets & homebox_assets):
+		paired = any(entry.get("inventory_id") and next((item for item in canonical["valid_items"] if item["inventory_id"] == entry["inventory_id"]), {}).get("asset_id") == asset_id and next((entity for entity in homebox_entities if str(entity.get("id")) == str(entry["entity_id"])), {}).get("assetId") == asset_id for entry in matches["represented_in_both"])
+		if not paired:
+			conflicts.append({"type": "unmatched_local_homebox_asset_id", "asset_id": asset_id})
 	asset_ids = _asset_report(local_assets, homebox_assets, reserved_assets, homebox_complete)
 	transactions = _transactions(settings)
 	asset_ids["conflicting"] = sorted({value for conflict in conflicts for value in (conflict.get("local_asset_id"), conflict.get("homebox_asset_id")) if value})
@@ -231,5 +260,151 @@ def refresh(*, settings=None, homebox_entities=None):
 		proposed_actions.append("inspect_unmatched_reservation")
 	if transactions:
 		proposed_actions.append("inspect_incomplete_transaction")
-	warnings = sum(bool(value) for value in (canonical["corrupt_manifests"], canonical["unsupported_schema_versions"], canonical["duplicate_inventory_ids"], canonical["duplicate_asset_ids"], canonical["missing_images"], canonical["checksum_mismatches"], legacy["legacy_candidates"], transactions, conflicts, matches["ambiguous"], unmatched_reservations, not homebox_complete))
-	return {"mode": "read_only", "status": "WARN" if warnings else "PASS", "paths": {"persistent_data_dir": str(settings.persistent_data_dir), "runtime_dir": str(settings.runtime_dir)}, "canonical": canonical, "legacy": legacy, "homebox": {"complete": homebox_complete, "error": homebox_error, "items": [{"entity_id": entity.get("id"), "asset_id": entity.get("assetId"), "name": entity.get("name"), "entity_type": entity.get("entityType"), "fields": entity.get("fields", []), "attachments": entity.get("attachments", []), "tags": entity.get("tags", []), "location": entity.get("location")} for entity in homebox_entities]}, "asset_ids": asset_ids, "reservations": {"entries": reservations, "unmatched": unmatched_reservations}, "transactions": {"incomplete": transactions}, "matches": matches, "conflicts": conflicts, "proposed_actions": sorted(proposed_actions)}
+	warnings = sum(bool(value) for value in (canonical["corrupt_manifests"], canonical["unsupported_schema_versions"], canonical["duplicate_inventory_ids"], canonical["duplicate_asset_ids"], canonical["missing_images"], canonical["checksum_mismatches"], canonical["unsafe_image_paths"], legacy["legacy_candidates"], legacy["unknown_format"], transactions, conflicts, matches["ambiguous"], matches["homebox_only"], matches["local_only"], unmatched_reservations, not homebox_complete))
+	return {"mode": "read_only", "status": "WARN" if warnings else "PASS", "paths": {"persistent_data_dir": str(settings.persistent_data_dir), "runtime_dir": str(settings.runtime_dir)}, "canonical": canonical, "legacy": legacy, "homebox": {"complete": homebox_complete, "error": homebox_error, "items": [{"entity_id": entity.get("id"), "asset_id": entity.get("assetId"), "name": entity.get("name"), "description": entity.get("description", ""), "manufacturer": entity.get("manufacturer", ""), "quantity": entity.get("quantity", 1), "entity_type": entity.get("entityType"), "fields": entity.get("fields", []), "attachments": entity.get("attachments", []), "tags": entity.get("tags", []), "location": entity.get("location"), "group_id": entity.get("groupId"), "purchase_price": entity.get("purchasePrice"), "purchase_date": entity.get("purchaseDate", ""), "purchase_from": entity.get("purchaseFrom", "")} for entity in homebox_entities]}, "asset_ids": asset_ids, "reservations": {"entries": reservations, "unmatched": unmatched_reservations}, "transactions": {"incomplete": transactions}, "matches": matches, "conflicts": conflicts, "proposed_actions": sorted(proposed_actions)}
+
+
+def _adoption_inventory_id(entity_id):
+	return f"INV-HB-{hashlib.sha256(str(entity_id).encode('utf-8')).hexdigest()[:12].upper()}"
+
+
+def _field_map(entity):
+	result = {}
+	for field in entity.get("fields", []):
+		if isinstance(field, dict) and field.get("name"):
+			result[str(field["name"]).casefold()] = field
+	return result
+
+
+def _adopted_manifest(entity, inventory_id):
+	fields = _field_map(entity)
+	def value(name):
+		field = fields.get(name.casefold(), {})
+		return field.get("textValue", field.get("numberValue", ""))
+	identifiers = {}
+	for key, name in (("isbn_10", "ISBN-10"), ("isbn_13", "ISBN-13"), ("upc", "UPC"), ("ean", "EAN"), ("barcode_text", "Barcode"), ("serial_number", "Serial Number"), ("model_number", "Model Number")):
+		values = [part.strip() for part in str(value(name) or entity.get("serialNumber" if key == "serial_number" else "modelNumber" if key == "model_number" else "")).split(";") if part.strip()]
+		if values:
+			identifiers[key] = values
+	return {"schema": ITEM_SCHEMA, "schema_version": SCHEMA_VERSION, "inventory_id": inventory_id, "asset_id": entity.get("assetId") or None, "status": "synced", "plugin_version": None, "item": {"name": entity.get("name", ""), "category": "", "manufacturer": entity.get("manufacturer", ""), "description": entity.get("description", ""), "condition": [], "quantity": entity.get("quantity", 1)}, "identifiers": identifiers, "attributes": [], "tags": entity.get("tags", []), "location": entity.get("location", {"name": None, "path": []}), "purchase_price": entity.get("purchase_price"), "purchase_date": entity.get("purchase_date", ""), "purchase_from": entity.get("purchase_from", ""), "images": [], "homebox": {"entity_id": entity.get("id"), "asset_id": entity.get("assetId"), "collection_id": entity.get("groupId"), "entity_type": (entity.get("entityType") or {}).get("id") if isinstance(entity.get("entityType"), dict) else entity.get("entityTypeId"), "last_synced_at": None, "fields": entity.get("fields", []), "tags": entity.get("tags", []), "location": entity.get("location"), "attachments": entity.get("attachments", [])}, "vision": {"raw_metadata_relative_path": None, "parse_status": "not_applicable"}, "field_sources": {}, "history": [{"operation": "homebox_adoption", "source": "system"}], "provenance": {"origin": "homebox_adoption", "local_originals": False, "sources": [{"type": "homebox_entity", "entity_id": entity.get("id")}]} }
+
+
+def build_plan(report):
+	"""Build deterministic local-only actions from a completed reconciliation scan."""
+	actions, skipped = [], []
+	if not report["homebox"]["complete"]:
+		return {"actions": [], "skipped": [{"reason": "homebox_incomplete"}], "fingerprint": _fingerprint([])}
+	canonical_ids = {item["inventory_id"] for item in report["canonical"]["valid_items"]}
+	entity_ids = {str(item.get("homebox_entity_id")) for item in report["canonical"]["valid_items"] if item.get("homebox_entity_id")}
+	entity_ids.update(str(entry["entity_id"]) for entry in report["matches"]["represented_in_both"])
+	entity_ids.update(entity_id for conflict in report["matches"]["conflicts"] for evidence in conflict.get("evidence", []) for entity_id in evidence.get("entity_ids", []))
+	ambiguous_entities = {str(entity_id) for entry in report["matches"]["ambiguous"] for entity_id in entry["entity_ids"]}
+	for item in report["canonical"]["valid_items"]:
+		if item["manifest"].get("schema_version") != SCHEMA_VERSION:
+			actions.append({"type": "upgrade_manifest", "path": item["path"], "inventory_id": item["inventory_id"]})
+	for entry in report["matches"]["represented_in_both"]:
+		item = next(item for item in report["canonical"]["valid_items"] if item["inventory_id"] == entry["inventory_id"])
+		if not item.get("homebox_entity_id"):
+			actions.append({"type": "link_homebox", "path": item["path"], "inventory_id": entry["inventory_id"], "entity_id": entry["entity_id"]})
+	for entity in report["homebox"]["items"]:
+		entity_id = str(entity.get("entity_id"))
+		if entity_id in entity_ids or entity_id in ambiguous_entities:
+			continue
+		if any(conflict.get("entity_id") == entity_id for conflict in report["conflicts"]):
+			continue
+		inventory_field = next((field for field in entity.get("fields", []) if isinstance(field, dict) and str(field.get("name", "")).casefold() == "inventory item id"), {})
+		candidate = str(inventory_field.get("textValue", "")).strip()
+		inventory_id = candidate if candidate and candidate not in canonical_ids else _adoption_inventory_id(entity_id)
+		actions.append({"type": "adopt_homebox", "entity_id": entity_id, "inventory_id": inventory_id})
+		canonical_ids.add(inventory_id)
+	for legacy in report["legacy"]["legacy_candidates"]:
+		metadata_path = Path(legacy["path"])
+		payload = _read_json(metadata_path)
+		inventory_id = str((payload or {}).get("item_id") or (payload or {}).get("inventory_id") or "").strip()
+		asset_id = str((payload or {}).get("asset_id") or "").strip()
+		source = metadata_path.parent.parent / "originals" / inventory_id
+		linked_entity_id = str((payload or {}).get("homebox_entity_id") or (payload or {}).get("entity_id") or "")
+		if metadata_path.parent.name != "metadata" or not inventory_id or inventory_id in canonical_ids or not _ASSET_RE.fullmatch(asset_id) or asset_id in report["asset_ids"]["used_locally"] or not source.is_dir():
+			continue
+		if asset_id in report["asset_ids"]["used_in_homebox"] and not any(str(entity["entity_id"]) == linked_entity_id and entity.get("asset_id") == asset_id for entity in report["homebox"]["items"]):
+			continue
+		images = sorted(path for path in source.iterdir() if path.is_file() and is_supported_image(path))
+		if images:
+			actions.append({"type": "migrate_legacy", "metadata_path": str(metadata_path), "source_directory": str(source), "inventory_id": inventory_id, "asset_id": asset_id})
+			canonical_ids.add(inventory_id)
+	return {"actions": actions, "skipped": skipped, "fingerprint": _fingerprint(actions)}
+
+
+def _fingerprint(actions):
+	payload = json.dumps(actions, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+	return hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
+def _apply_action(action, report, settings):
+	if action["type"] == "upgrade_manifest":
+		path = Path(action["path"])
+		atomic_json_write(path, upgrade_manifest_schema(_read_json(path)))
+	elif action["type"] == "link_homebox":
+		path = Path(action["path"]); manifest = upgrade_manifest_schema(_read_json(path))
+		manifest.setdefault("homebox", {})["entity_id"] = action["entity_id"]
+		atomic_json_write(path, manifest)
+	elif action["type"] == "adopt_homebox":
+		entity = next(entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == action["entity_id"])
+		transaction = begin_item_transaction(action["inventory_id"], settings)
+		try:
+			atomic_json_write(transaction / "item.json", _adopted_manifest({"id": entity["entity_id"], "assetId": entity["asset_id"], "name": entity["name"], "description": entity["description"], "manufacturer": entity["manufacturer"], "quantity": entity["quantity"], "entityType": entity["entity_type"], "fields": entity["fields"], "attachments": entity["attachments"], "tags": entity["tags"], "location": entity["location"], "groupId": entity["group_id"], "purchase_price": entity["purchase_price"], "purchase_date": entity["purchase_date"], "purchase_from": entity["purchase_from"]}, action["inventory_id"]))
+			commit_item_transaction(transaction, action["inventory_id"], settings)
+		except Exception:
+			raise
+	elif action["type"] == "migrate_legacy":
+		raw = _read_json(Path(action["metadata_path"]))
+		if raw is None:
+			raise RuntimeError("Legacy metadata changed during refresh")
+		transaction = begin_item_transaction(action["inventory_id"], settings)
+		try:
+			images_dir = transaction / "images"
+			for source in sorted(Path(action["source_directory"]).iterdir()):
+				if not source.is_file() or not is_supported_image(source):
+					continue
+				destination = images_dir / source.name
+				shutil.copy2(source, destination)
+				if sha256_file(source) != sha256_file(destination):
+					raise RuntimeError(f"Legacy image copy verification failed: {source.name}")
+			record = normalize_record(raw)
+			record["asset_id"] = action["asset_id"]
+			record["source_images"] = [path.name for path in sorted(images_dir.iterdir()) if path.is_file()]
+			record["source_filenames"] = {name: name for name in record["source_images"]}
+			record["image_hashes"] = [{"filename": name, "sha256": sha256_file(images_dir / name)} for name in record["source_images"]]
+			canonicalize_images(record, images_dir)
+			raw["item_id"] = action["inventory_id"]
+			raw["source_directory"] = str(images_dir)
+			raw["source_images"] = list(record["source_images"])
+			atomic_json_write(transaction / "vision.json", raw)
+			manifest = build_manifest(action["inventory_id"], record, raw, images_dir, status="synced", homebox={"entity_id": raw.get("homebox_entity_id") or raw.get("entity_id"), "asset_id": action["asset_id"], "collection_id": None, "entity_type": None, "last_synced_at": None})
+			manifest["provenance"] = {"origin": "legacy_migration", "local_originals": True, "sources": [{"type": "legacy_metadata", "path": action["metadata_path"]}, {"type": "legacy_originals", "path": action["source_directory"]}]}
+			atomic_json_write(transaction / "item.json", manifest)
+			commit_item_transaction(transaction, action["inventory_id"], settings)
+		except Exception:
+			raise
+
+
+def apply_refresh(*, settings=None, homebox_entities=None):
+	"""Apply only deterministic local changes after a verified Inventory backup."""
+	settings = settings or get_settings()
+	report = refresh(settings=settings, homebox_entities=homebox_entities)
+	plan = build_plan(report)
+	if not plan["actions"]:
+		return {"mode": "apply", "status": report["status"], "backup": None, "applied": [], "skipped": plan["skipped"], "report": report}
+	from inventory.backup import create_backup, verify_backup
+	backup = create_backup(settings=settings)
+	verification = verify_backup(Path(backup["path"]))
+	if verification.get("status") != "PASS":
+		return {"mode": "apply", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": [], "skipped": [{"reason": "backup_verification_failed"}], "report": report}
+	current = refresh(settings=settings, homebox_entities=homebox_entities)
+	if build_plan(current)["fingerprint"] != plan["fingerprint"]:
+		return {"mode": "apply", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": [], "skipped": [{"reason": "state_changed_during_refresh"}], "report": current}
+	for action in plan["actions"]:
+		_apply_action(action, current, settings)
+	write_catalog(settings)
+	final = refresh(settings=settings, homebox_entities=homebox_entities)
+	return {"mode": "apply", "status": final["status"], "backup": backup, "backup_verification": verification, "applied": plan["actions"], "skipped": plan["skipped"], "report": final}

@@ -14,7 +14,7 @@ from inventory.media import is_supported_image
 from inventory.normalize import normalize_record
 from inventory.storage import (
 	abandon_item_transaction, atomic_json_write, begin_item_transaction,
-	allocate_asset_id, build_manifest, canonicalize_images, commit_item_transaction, load_manifest, write_catalog, write_manifest,
+	build_manifest, canonicalize_images, commit_item_transaction, load_manifest, release_asset_id_reservation, reserve_asset_id, write_catalog, write_manifest,
 )
 from inventory.vision import analyze_directory
 
@@ -80,6 +80,7 @@ def ingest(source_directory, vision_client, *, settings=None):
 	item_id = generate_item_id()
 	transaction = begin_item_transaction(item_id, settings)
 	images_dir = transaction / "images"
+	reservation = None
 	try:
 		provenance = prepare_originals(source_directory, images_dir)
 		raw, metadata_path = run_vision(images_dir, vision_client, metadata_path=transaction / "vision.json")
@@ -94,15 +95,14 @@ def ingest(source_directory, vision_client, *, settings=None):
 			result = {"status": "duplicate_candidate", "created": False, "durable": True, "item_id": item_id, "classification": duplicate_result["classification"], "duplicate_check": duplicate_result}
 			result["receipt_path"] = str(save_receipt(item_id, result, settings))
 			return result
-		record["asset_id"] = allocate_asset_id(settings)
-		record["field_sources"] = {key: "vision" for key in ("name", "description", "category", "manufacturer", "condition", "identifiers", "attributes", "image_roles")}
 		try:
-			from inventory.homebox import list_entities
-			response = list_entities()
-			entities = response.get("items", []) if isinstance(response, dict) else response
-		except Exception:
-			# HomeBox availability is verified by the regular create path; local reservations still prevent reuse.
-			entities = []
+			from inventory.homebox import list_all_entities
+			entities = list_all_entities()
+		except Exception as exc:
+			raise RuntimeError("Cannot allocate a globally safe Asset ID because HomeBox state could not be completely enumerated.") from exc
+		reservation = reserve_asset_id(settings, external_used_ids=[entity.get("assetId") for entity in entities if isinstance(entity, dict)])
+		record["asset_id"] = reservation[0]
+		record["field_sources"] = {key: "vision" for key in ("name", "description", "category", "manufacturer", "condition", "identifiers", "attributes", "image_roles")}
 		if any(str(entity.get("assetId", "")) == record["asset_id"] for entity in entities if isinstance(entity, dict)):
 			raise RuntimeError(f"Asset ID is already in use in HomeBox: {record['asset_id']}")
 		canonicalize_images(record, images_dir)
@@ -140,3 +140,6 @@ def ingest(source_directory, vision_client, *, settings=None):
 		# Leave the same-filesystem transaction directory for non-destructive
 		# recovery inspection; it has no completion marker or item manifest path.
 		raise
+	finally:
+		if reservation is not None:
+			release_asset_id_reservation(settings, reservation[0], reservation[1])

@@ -109,14 +109,14 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertIn({"name": "Cyberpunk", "source": "user"}, manifest["tags"])
 		self.assertIn({"name": "Type: Book", "source": "system"}, manifest["tags"])
 
-	def test_legacy_manifest_gets_asset_id_and_schema_when_resynced(self):
+	def test_legacy_manifest_can_resync_without_implicit_asset_id(self):
 		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload.pop("asset_id"); payload.pop("field_sources"); payload.pop("history"); payload["schema_version"] = 1
 		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
 		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
 			update_item(self.item_id, "resync", settings=self.settings)
 		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
-		self.assertEqual(manifest["schema_version"], 2)
-		self.assertEqual(manifest["asset_id"], "000-001")
+		self.assertEqual(manifest["schema_version"], 3)
+		self.assertIsNone(manifest.get("asset_id"))
 
 	def test_homebox_failure_keeps_local_edit_pending_for_later_resync(self):
 		with patch("inventory.homebox.complete_entity", side_effect=RuntimeError("offline")):

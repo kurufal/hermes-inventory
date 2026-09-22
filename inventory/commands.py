@@ -74,9 +74,16 @@ def _status(settings):
 	return "\n".join(lines)
 
 
-def _format_refresh(report):
+def _format_refresh(report, *, applied=None):
 	matches = report["matches"]
-	lines = ["Hermes Inventory Refresh", "Mode: READ-ONLY PREVIEW", "No changes were made.", "", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report['conflicts'])}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"]
+	mode = "READ-ONLY PREVIEW" if applied is None else "APPLY"
+	lines = ["Hermes Inventory Refresh", f"Mode: {mode}"]
+	if applied is None:
+		lines.append("No changes were made.")
+	else:
+		if not applied:
+			lines.append("Inventory is already reconciled.\nNo backup or changes were required.")
+		lines.extend(["", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report['conflicts'])}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"])
 	if not report["homebox"]["complete"]:
 		lines.append("[WARN] HomeBox enumeration incomplete; no globally safe next Asset ID is reported.")
 	if report["proposed_actions"]:
@@ -98,6 +105,18 @@ def _setup_status(settings):
 		lines.extend(["", "Configure HomeBox URL with:", "/inventory setup homebox <url>"])
 	if settings.persistent_source == "default":
 		lines.extend(["", "Persistent storage is using the local default:", str(settings.persistent_data_dir), "For permanent/NAS storage:", "/inventory setup storage <path>"])
+	if any(state == "PASS" and label == "HomeBox authentication" for state, label, _ in checks):
+		try:
+			from inventory.refresh import refresh
+			report = refresh(settings=settings)
+			if report["legacy"]["legacy_candidates"]:
+				lines.append(f"[WARN] Legacy Inventory data detected: {len(report['legacy']['legacy_candidates'])} records")
+			if report["matches"]["homebox_only"]:
+				lines.append(f"[WARN] HomeBox contains {len(report['matches']['homebox_only'])} items not represented locally")
+			if report["legacy"]["legacy_candidates"] or report["matches"]["homebox_only"]:
+				lines.extend(["Run:", "/inventory refresh"])
+		except Exception as exc:
+			lines.append(f"[WARN] Reconciliation preview unavailable: {type(exc).__name__}")
 	return "\n".join(lines)
 
 
@@ -174,8 +193,14 @@ def inventory_command(raw_args="", **kwargs):
 		operation = parts[1] if len(parts) > 1 else ""
 		if operation and operation != "--dry-run":
 			return _help("refresh")
-		from inventory.refresh import refresh
-		return _format_refresh(refresh(settings=settings))
+		from inventory.refresh import apply_refresh, refresh
+		if operation == "--dry-run":
+			return _format_refresh(refresh(settings=settings))
+		result = apply_refresh(settings=settings)
+		lines = _format_refresh(result["report"], applied=result["applied"])
+		if result.get("backup"):
+			lines += f"\n\nBackup:\n{result['backup']['path']}\nBackup verification: {result.get('backup_verification', {}).get('status', 'not_run')}"
+		return lines
 	if command == "doctor":
 		return _format_checks(_verification(settings))
 	if command == "storage":
