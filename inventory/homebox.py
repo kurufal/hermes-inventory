@@ -8,6 +8,21 @@ from inventory.config import HOMEBOX_ATTACHMENT_TIMEOUT_SECONDS, HOMEBOX_TIMEOUT
 from inventory.fields import build_homebox_fields
 
 
+class HomeBoxEnumerationError(RuntimeError):
+	"""A GET-only entity enumeration did not complete authoritatively."""
+
+	def __init__(self, message, partial_entities=()):
+		super().__init__(message)
+		self.partial_entities = list(partial_entities)
+
+
+def _positive_int(value):
+	try:
+		return int(value)
+	except (TypeError, ValueError):
+		return None
+
+
 def _base_url():
 	url = homebox_url()
 	if not url:
@@ -66,6 +81,53 @@ def list_entities():
 
 	response.raise_for_status()
 	return response.json()
+
+
+def list_all_entities(*, max_pages=1000, page_size=100):
+	"""Enumerate HomeBox entities with GET requests only and safe pagination guards."""
+	entities, seen_ids = [], set()
+	page = 1
+	for _ in range(max_pages):
+		response = requests.get(
+			f"{_base_url()}/api/v1/entities",
+			headers=auth_headers(),
+			params={"page": page, "pageSize": page_size},
+			timeout=HOMEBOX_TIMEOUT_SECONDS,
+		)
+		try:
+			response.raise_for_status()
+			payload = response.json()
+		except Exception as exc:
+			raise HomeBoxEnumerationError(f"HomeBox entity enumeration failed: {type(exc).__name__}", entities) from exc
+		if isinstance(payload, list):
+			page_items, metadata = payload, {}
+		elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+			page_items = payload["items"]
+			metadata = payload.get("pagination") or payload.get("meta") or payload
+		else:
+			raise HomeBoxEnumerationError("HomeBox entity enumeration returned an unsupported response", entities)
+		new_count = 0
+		for entity in page_items:
+			if not isinstance(entity, dict) or not entity.get("id"):
+				continue
+			entity_id = str(entity["id"])
+			if entity_id not in seen_ids:
+				seen_ids.add(entity_id)
+				entities.append(entity)
+				new_count += 1
+		if isinstance(payload, list):
+			return entities
+		total_pages = _positive_int(metadata.get("totalPages") or metadata.get("total_pages"))
+		next_page = _positive_int(metadata.get("nextPage") or metadata.get("next_page"))
+		current_page = _positive_int(metadata.get("page") or metadata.get("currentPage")) or page
+		total = _positive_int(metadata.get("total"))
+		has_more = bool(next_page) or (total_pages is not None and current_page < total_pages) or (total is not None and len(entities) < total)
+		if not has_more:
+			return entities
+		if not new_count:
+			raise HomeBoxEnumerationError("HomeBox entity enumeration repeated a page", entities)
+		page = next_page if next_page else page + 1
+	raise HomeBoxEnumerationError("HomeBox entity enumeration exceeded its page limit", entities)
 
 
 def list_tags():

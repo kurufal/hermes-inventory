@@ -18,6 +18,16 @@ class InventoryCommandTests(unittest.TestCase):
 			self.assertIn("Inventory persistent data", result)
 			health.assert_not_called()
 
+	def test_refresh_and_dry_run_are_read_only_preview(self):
+		preview = {"canonical": {"valid_items": []}, "legacy": {"legacy_candidates": []}, "homebox": {"items": [], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True), patch("inventory.refresh.refresh", return_value=preview) as scanner:
+				result = inventory_command("refresh")
+				dry_run = inventory_command("refresh --dry-run")
+		self.assertIn("Mode: READ-ONLY PREVIEW", result)
+		self.assertIn("No changes were made.", dry_run)
+		self.assertEqual(scanner.call_count, 2)
+
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=False), patch("inventory.commands.storage_health", return_value=(True, "reachable")):

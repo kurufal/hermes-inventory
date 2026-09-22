@@ -140,7 +140,9 @@ Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging 
 
 ## Commands
 
-`/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
+`/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory refresh`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
+
+`/inventory refresh` (and `/inventory refresh --dry-run`) is a read-only reconciliation preview in this release. It compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records. It reports possible future actions but makes no local or HomeBox changes.
 
 ## Updating Items
 

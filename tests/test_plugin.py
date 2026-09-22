@@ -4,6 +4,7 @@ import importlib.util
 import argparse
 import tempfile
 import unittest
+import yaml
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -372,12 +373,30 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		with patch.object(self.plugin, "start_pending_upload_watcher"):
 			self.plugin.register(FakeContext())
 
-		manifest = (PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8")
-		provided_line = next(line for line in manifest.splitlines() if line.startswith("provides_tools:"))
-		provided_tools = {
-			name.strip() for name in provided_line.partition("[")[2].rstrip("]").split(",")
-		}
+		manifest = yaml.safe_load((PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
+		provided_tools = set(manifest["provides_tools"])
 		self.assertEqual(provided_tools, set(registrations))
+
+	def test_skill_description_covers_all_clear_inventory_intent(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				registrations.update(kwargs)
+
+			def register_tool(self, **kwargs):
+				return {"registered": True}
+
+		with patch.object(self.plugin, "start_pending_upload_watcher"):
+			self.plugin.register(FakeContext())
+		description = registrations["description"].lower()
+		for phrase in ("clear physical-item inventory/homebox requests only", "add", "catalog", "ingest", "find", "read", "search", "edit", "update", "reanalyze", "resync"):
+			self.assertIn(phrase, description)
 
 	def test_ingest_description_has_conservative_eligibility_and_clear_intent(self):
 		registrations = {}

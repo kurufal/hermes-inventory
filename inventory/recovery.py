@@ -7,7 +7,7 @@ from pathlib import Path
 from inventory.config import get_settings
 from inventory.hashing import sha256_file
 from inventory.storage import ITEM_SCHEMA, SCHEMA_VERSION
-from inventory.constants import CATALOG_SCHEMA
+from inventory.constants import CATALOG_SCHEMA, OBSERVATION_SCHEMA
 
 
 def _safe_item_path(item_root: Path, relative_path: str) -> Path | None:
@@ -24,7 +24,7 @@ def _safe_item_path(item_root: Path, relative_path: str) -> Path | None:
 
 def scan() -> dict:
 	settings = get_settings()
-	report = {"valid_items": [], "corrupt_manifests": [], "unsupported_schema_versions": [], "incomplete_transactions": [], "missing_images": [], "unsafe_image_paths": [], "checksum_mismatches": [], "pending_homebox_sync": [], "homebox_linked_items": [], "duplicate_inventory_ids": [], "duplicate_asset_ids": [], "duplicate_observations": [], "catalog_inconsistencies": []}
+	report = {"valid_items": [], "corrupt_manifests": [], "unsupported_schema_versions": [], "incomplete_transactions": [], "missing_images": [], "unsafe_image_paths": [], "checksum_mismatches": [], "pending_homebox_sync": [], "homebox_linked_items": [], "duplicate_inventory_ids": [], "duplicate_asset_ids": [], "duplicate_observations": [], "legacy_observations": [], "malformed_observations": [], "catalog_inconsistencies": []}
 	ids, asset_ids = [], []
 	if settings.items_dir.exists():
 		report["incomplete_transactions"] = [str(path) for path in settings.items_dir.glob(".tmp-*") if path.is_dir()]
@@ -77,8 +77,19 @@ def scan() -> dict:
 			report["catalog_inconsistencies"].append(f"invalid catalog: {exc}")
 	observations = settings.persistent_data_dir / "observations"
 	if observations.exists():
-		report["duplicate_observations"] = [str(path) for path in observations.glob("*.json")]
-	report["status"] = "PASS" if not any(report[key] for key in report if key not in {"valid_items", "status"}) else "WARN"
+		for path in sorted(observations.glob("*.json")):
+			try:
+				observation = json.loads(path.read_text(encoding="utf-8"))
+			except (OSError, json.JSONDecodeError):
+				report["malformed_observations"].append(str(path))
+				continue
+			if observation.get("schema") == OBSERVATION_SCHEMA and observation.get("schema_version") == SCHEMA_VERSION:
+				continue
+			if observation.get("schema"):
+				report["legacy_observations"].append(str(path))
+			else:
+				report["malformed_observations"].append(str(path))
+	report["status"] = "PASS" if not any(report[key] for key in report if key not in {"valid_items", "status", "duplicate_observations"}) else "WARN"
 	return report
 
 

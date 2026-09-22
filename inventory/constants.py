@@ -1,6 +1,6 @@
 """Authoritative plugin and persistent-format identifiers."""
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 ITEM_SCHEMA = "hermes-inventory-item"
 BACKUP_SCHEMA = "hermes-inventory-backup"
 CATALOG_SCHEMA = "hermes-inventory-catalog"

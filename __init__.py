@@ -307,9 +307,9 @@ def register(ctx):
 		"inventory",
 		PLUGIN_ROOT / "skills" / "inventory" / "SKILL.md",
 		description=(
-			"Routing for clear physical-item Inventory/HomeBox requests only, such "
-			"as 'add this to my inventory', 'inventory this', 'catalog this', or "
-			"'record this item'."
+			"Routing for clear physical-item Inventory/HomeBox requests only: add, "
+			"catalog, or ingest items; find, read, or search existing items; and edit, "
+			"update, reanalyze, or resync existing records."
 		),
 	)
 

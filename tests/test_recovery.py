@@ -9,6 +9,21 @@ from inventory.recovery import plan, scan
 
 
 class RecoverySafetyTests(unittest.TestCase):
+	def test_current_observation_does_not_warn_but_malformed_one_does(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			observations = home / "inventory" / "observations"
+			observations.mkdir(parents=True)
+			(observations / "current.json").write_text(json.dumps({"schema": "hermes-inventory-observation", "schema_version": 2}), encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				report = scan()
+			self.assertEqual(report["status"], "PASS")
+			self.assertFalse(report["duplicate_observations"])
+			(observations / "broken.json").write_text("not json", encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
+				report = scan()
+			self.assertEqual(report["status"], "WARN")
+			self.assertEqual(report["malformed_observations"], [str(observations / "broken.json")])
 	def test_manifest_path_escape_is_reported_without_reading_target(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			home = Path(temporary_directory)

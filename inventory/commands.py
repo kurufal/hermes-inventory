@@ -14,8 +14,9 @@ from inventory.constants import PLUGIN_VERSION
 
 def _help(topic=""):
 	commands = {
-		"": "Commands: setup, status, doctor, storage, uploads, homebox, backup, recover, version, help",
+		"": "Commands: setup, status, doctor, refresh, storage, uploads, homebox, backup, recover, version, help",
 		"setup": "Usage: /inventory setup [storage <absolute path>|storage default|homebox <url>|secrets|test|help]",
+		"refresh": "Usage: /inventory refresh [--dry-run]",
 		"storage": "Usage: /inventory storage [show|test|set <absolute path>|reset|help]",
 	}
 	return commands.get(topic, commands[""])
@@ -54,7 +55,7 @@ def _format_checks(checks):
 
 
 def _status(settings):
-	return "\n".join([
+	lines = [
 		f"Hermes home: {settings.hermes_home}",
 		f"Hermes uploads: {settings.hermes_images_dir}",
 		f"Inventory runtime: {settings.runtime_dir}",
@@ -62,7 +63,25 @@ def _status(settings):
 		f"Persistent source: {settings.persistent_source}",
 		f"HomeBox URL: {'configured' if homebox_url(settings) else 'missing'}",
 		f"HomeBox API key: {'configured' if homebox_api_key() else 'missing'}",
-	])
+	]
+	from inventory.refresh import local_diagnostics
+	diagnostics = local_diagnostics(settings=settings)
+	for label, entries in (("Legacy Inventory data", diagnostics["legacy_candidates"]), ("Unmatched Asset ID reservations", diagnostics["unmatched_reservations"]), ("Incomplete Inventory transactions", diagnostics["incomplete_transactions"])):
+		if entries:
+			lines.append(f"[WARN] {label} detected: {len(entries)}")
+	if any(diagnostics[key] for key in ("legacy_candidates", "unmatched_reservations", "incomplete_transactions")):
+		lines.extend(["Run:", "/inventory refresh"])
+	return "\n".join(lines)
+
+
+def _format_refresh(report):
+	matches = report["matches"]
+	lines = ["Hermes Inventory Refresh", "Mode: READ-ONLY PREVIEW", "No changes were made.", "", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report['conflicts'])}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"]
+	if not report["homebox"]["complete"]:
+		lines.append("[WARN] HomeBox enumeration incomplete; no globally safe next Asset ID is reported.")
+	if report["proposed_actions"]:
+		lines.extend(["", "Suggested future actions:", *[f"- {action}" for action in report["proposed_actions"]]])
+	return "\n".join(lines)
 
 
 def _setup_status(settings):
@@ -151,6 +170,12 @@ def inventory_command(raw_args="", **kwargs):
 		return _help("setup")
 	if command == "status":
 		return _status(settings)
+	if command == "refresh":
+		operation = parts[1] if len(parts) > 1 else ""
+		if operation and operation != "--dry-run":
+			return _help("refresh")
+		from inventory.refresh import refresh
+		return _format_refresh(refresh(settings=settings))
 	if command == "doctor":
 		return _format_checks(_verification(settings))
 	if command == "storage":
