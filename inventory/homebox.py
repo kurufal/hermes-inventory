@@ -1,5 +1,6 @@
 """HomeBox entity, field, and attachment integration."""
 
+import re
 from pathlib import Path
 
 import requests
@@ -14,6 +15,45 @@ class HomeBoxEnumerationError(RuntimeError):
 	def __init__(self, message, partial_entities=()):
 		super().__init__(message)
 		self.partial_entities = list(partial_entities)
+
+
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def normalize_homebox_entity(entity):
+	"""Return one reconciliation-safe representation for list and detail payloads."""
+	if not isinstance(entity, dict):
+		return {}
+	fields = []
+	for field in entity.get("fields", []):
+		if not isinstance(field, dict):
+			continue
+		normalized = dict(field)
+		if normalized.get("textValue") is None and normalized.get("numberValue") is None and normalized.get("value") is not None:
+			normalized["textValue"] = normalized["value"]
+		if str(normalized.get("name", "")).casefold() == "image sha-256":
+			values = []
+			for key in ("textValue", "numberValue", "value"):
+				if normalized.get(key) is not None:
+					values.extend(part.strip().casefold() for part in str(normalized[key]).split(";") if _SHA256_RE.fullmatch(part.strip()))
+			for value in dict.fromkeys(values):
+				fields.append({**normalized, "textValue": value, "numberValue": None, "value": value})
+		else:
+			fields.append(normalized)
+	return {
+		"entity_id": entity.get("id", entity.get("entity_id")),
+		"asset_id": entity.get("assetId", entity.get("asset_id")),
+		"name": entity.get("name", ""), "description": entity.get("description", ""),
+		"manufacturer": entity.get("manufacturer", ""), "quantity": entity.get("quantity", 1),
+		"entity_type": entity.get("entityType", entity.get("entity_type")), "fields": fields,
+		"attachments": entity.get("attachments", []), "tags": entity.get("tags", []),
+		"location": entity.get("location"), "group_id": entity.get("groupId", entity.get("group_id")),
+		"purchase_price": entity.get("purchasePrice", entity.get("purchase_price")),
+		"purchase_date": entity.get("purchaseDate", entity.get("purchase_date", "")),
+		"purchase_from": entity.get("purchaseFrom", entity.get("purchase_from", "")),
+		"serial_number": entity.get("serialNumber", entity.get("serial_number")),
+		"model_number": entity.get("modelNumber", entity.get("model_number")),
+	}
 
 
 def _positive_int(value):
@@ -133,6 +173,21 @@ def list_all_entities(*, max_pages=1000, page_size=100):
 			raise HomeBoxEnumerationError("HomeBox entity enumeration repeated a page", entities)
 		page = next_page if next_page else page + 1
 	raise HomeBoxEnumerationError("HomeBox entity enumeration exceeded its page limit", entities)
+
+
+def list_all_entities_detailed():
+	"""Enumerate every entity then read each authoritative entity detail payload."""
+	summaries = list_all_entities()
+	detailed = []
+	for summary in summaries:
+		entity_id = summary.get("id") if isinstance(summary, dict) else None
+		if not entity_id:
+			raise HomeBoxEnumerationError("HomeBox entity enumeration returned an entity without an ID", detailed)
+		try:
+			detailed.append(normalize_homebox_entity(get_entity(entity_id)))
+		except Exception as exc:
+			raise HomeBoxEnumerationError(f"HomeBox entity detail enumeration failed for {entity_id}: {type(exc).__name__}", detailed) from exc
+	return detailed
 
 
 def list_tags():

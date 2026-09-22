@@ -1,5 +1,7 @@
 """Pure, conservative identity comparison for Inventory reconciliation."""
 
+import re
+
 
 PRODUCT_FIELDS = {
 	"isbn_10": "ISBN-10",
@@ -9,6 +11,16 @@ PRODUCT_FIELDS = {
 	"barcode_text": "Barcode",
 	"model_number": "Model Number",
 }
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _entity_id(entity):
+	return str(entity.get("entity_id", entity.get("id", "")))
+
+
+def image_sha256_values(entity):
+	return {value for value in entity_field_values(entity, "Image SHA-256") if _SHA256_RE.fullmatch(value)}
 
 
 def normalized_values(value):
@@ -32,7 +44,7 @@ def entity_field_values(entity, name):
 
 def entity_identifiers(entity):
 	result = {key: entity_field_values(entity, field_name) for key, field_name in PRODUCT_FIELDS.items()}
-	for key, top_level in (("serial_number", "serialNumber"), ("model_number", "modelNumber")):
+	for key, top_level in (("serial_number", "serial_number"), ("model_number", "model_number")):
 		result.setdefault(key, set()).update(normalized_values(entity.get(top_level, "")))
 	result["serial_number"].update(entity_field_values(entity, "Serial Number"))
 	return result
@@ -40,7 +52,7 @@ def entity_identifiers(entity):
 
 def match_manifest(manifest, entities):
 	"""Return conservative matches without treating product IDs or names as identity."""
-	entities = [entity for entity in entities if isinstance(entity, dict) and entity.get("id")]
+	entities = [entity for entity in entities if isinstance(entity, dict) and _entity_id(entity)]
 	inventory_id = str(manifest.get("inventory_id", "")).strip().casefold()
 	stored_entity_id = str(manifest.get("homebox", {}).get("entity_id") or "").strip()
 	hashes = {
@@ -57,12 +69,12 @@ def match_manifest(manifest, entities):
 		return [entity for entity in entities if predicate(entity)]
 
 	checks = [
-		("stored_entity_id", candidates(lambda entity: stored_entity_id and str(entity.get("id")) == stored_entity_id)),
+		("stored_entity_id", candidates(lambda entity: stored_entity_id and _entity_id(entity) == stored_entity_id)),
 		("inventory_item_id", candidates(lambda entity: inventory_id and inventory_id in entity_field_values(entity, "Inventory Item ID"))),
-		("image_sha256", candidates(lambda entity: hashes & entity_field_values(entity, "Image SHA-256"))),
+		("image_sha256", candidates(lambda entity: hashes & image_sha256_values(entity))),
 		("serial_number", candidates(lambda entity: serials & entity_identifiers(entity).get("serial_number", set()))),
 	]
-	evidence = [{"kind": kind, "entity_ids": sorted(str(entity["id"]) for entity in matches)} for kind, matches in checks if matches]
+	evidence = [{"kind": kind, "entity_ids": sorted(_entity_id(entity) for entity in matches)} for kind, matches in checks if matches]
 	if any(len(entry["entity_ids"]) > 1 for entry in evidence):
 		return {"classification": "ambiguous", "kind": "strong_identity", "entity": None, "candidates": [entity for _, matches in checks for entity in matches], "evidence": evidence}
 	strong_ids = {entry["entity_ids"][0] for entry in evidence}
@@ -70,7 +82,7 @@ def match_manifest(manifest, entities):
 		return {"classification": "conflict", "kind": "strong_identity", "entity": None, "candidates": [entity for _, matches in checks for entity in matches], "evidence": evidence}
 	if len(strong_ids) == 1:
 		entity_id = next(iter(strong_ids))
-		entity = next(entity for entity in entities if str(entity["id"]) == entity_id)
+		entity = next(entity for entity in entities if _entity_id(entity) == entity_id)
 		return {"classification": "strong_match", "kind": evidence[0]["kind"], "entity": entity, "candidates": [], "evidence": evidence}
 
 	product_matches = []
@@ -80,6 +92,6 @@ def match_manifest(manifest, entities):
 		for entity in candidates(lambda entry: values & entity_identifiers(entry).get(key, set())):
 			product_matches.append(entity)
 	if product_matches:
-		by_id = {str(entity["id"]): entity for entity in product_matches}
+		by_id = {_entity_id(entity): entity for entity in product_matches}
 		return {"classification": "candidate", "kind": "product_identifier", "entity": None, "candidates": [by_id[key] for key in sorted(by_id)], "evidence": []}
 	return {"classification": "unmatched", "kind": None, "entity": None, "candidates": [], "evidence": []}

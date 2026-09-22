@@ -109,10 +109,11 @@ class RefreshTests(unittest.TestCase):
 		self.assertEqual(report["matches"]["represented_in_both"], [])
 
 	def test_image_hash_is_a_strong_match(self):
-		manifest = self.write_item(image_hash="abc")
+		digest = "a" * 64
+		manifest = self.write_item(image_hash=digest)
 		image = self.settings.items_dir / manifest["inventory_id"] / "images" / "image.jpg"
-		with patch("inventory.refresh.sha256_file", return_value="abc"):
-			report = refresh(settings=self.settings, homebox_entities=[entity("one", "000-001", [{"name": "Image SHA-256", "textValue": "abc"}])])
+		with patch("inventory.refresh.sha256_file", return_value=digest):
+			report = refresh(settings=self.settings, homebox_entities=[entity("one", "000-001", [{"name": "Image SHA-256", "textValue": digest}])])
 		self.assertEqual(report["matches"]["represented_in_both"][0]["kind"], "image_sha256")
 
 	def test_refresh_makes_no_filesystem_writes_or_homebox_mutations(self):
@@ -309,6 +310,72 @@ class RefreshTests(unittest.TestCase):
 		with patch("inventory.homebox.get_entity", return_value=entity("hb-1", "000-001", [{"name": "Serial Number", "textValue": "changed"}])):
 			with self.assertRaisesRegex(RuntimeError, "HomeBox identity changed"):
 				_apply_action(action, report, self.settings, live_homebox=True)
+
+	def test_refresh_uses_detailed_homebox_fields_for_adoption_and_live_check(self):
+		hash_a, hash_b = "a" * 64, "b" * 64
+		summary = entity("hb-1", "000-001", [], "Cyberpunk")
+		detail = entity("hb-1", "000-001", [{"name": "Inventory Item ID", "value": "INV-20260901-204535-601208be"}, {"name": "Image SHA-256", "value": f"{hash_a}; {hash_b}"}], "Cyberpunk")
+		with patch("inventory.homebox.list_all_entities", return_value=[summary]), patch("inventory.homebox.get_entity", return_value=detail):
+			report = refresh(settings=self.settings)
+			action = next(action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox")
+			self.assertEqual(action["inventory_id"], "INV-20260901-204535-601208be")
+			self.assertEqual([field["textValue"] for field in report["homebox"]["items"][0]["fields"] if field["name"] == "Image SHA-256"], [hash_a, hash_b])
+			_apply_action(action, report, self.settings, live_homebox=True)
+		manifest = json.loads(next(self.settings.items_dir.glob("*/item.json")).read_text(encoding="utf-8"))
+		self.assertEqual(manifest["inventory_id"], "INV-20260901-204535-601208be")
+
+	def test_live_adoption_identity_change_still_fails_closed(self):
+		planned = entity("hb-1", "000-001", [{"name": "Inventory Item ID", "value": "INV-A"}])
+		report = refresh(settings=self.settings, homebox_entities=[planned])
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox")
+		with patch("inventory.homebox.get_entity", return_value=entity("hb-1", "000-001", [{"name": "Inventory Item ID", "value": "INV-B"}])):
+			with self.assertRaisesRegex(RuntimeError, "HomeBox identity changed"):
+				_apply_action(action, report, self.settings, live_homebox=True)
+		with patch("inventory.homebox.get_entity", return_value=entity("hb-1", "000-002", [{"name": "Inventory Item ID", "value": "INV-A"}])):
+			with self.assertRaisesRegex(RuntimeError, "HomeBox identity changed"):
+				_apply_action(action, report, self.settings, live_homebox=True)
+
+	def test_duplicate_and_unsafe_homebox_inventory_ids_are_not_adopted_as_paths(self):
+		duplicate = [entity("one", "000-001", [{"name": "Inventory Item ID", "value": "INV-duplicate"}]), entity("two", "000-002", [{"name": "Inventory Item ID", "value": "INV-duplicate"}])]
+		report = refresh(settings=self.settings, homebox_entities=duplicate)
+		self.assertIn("duplicate_homebox_inventory_id", [conflict["type"] for conflict in report["conflicts"]])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox"])
+		report = refresh(settings=self.settings, homebox_entities=[entity("unsafe", "000-003", [{"name": "Inventory Item ID", "value": "../unsafe"}])])
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "adopt_homebox")
+		self.assertTrue(action["inventory_id"].startswith("INV-HB-"))
+
+	def test_detailed_homebox_enumeration_failure_fails_closed(self):
+		with patch("inventory.homebox.list_all_entities", return_value=[entity("hb-1", "000-001")]), patch("inventory.homebox.get_entity", side_effect=RuntimeError("unavailable")):
+			report = refresh(settings=self.settings)
+		self.assertFalse(report["homebox"]["complete"])
+		self.assertIn("detail enumeration failed", report["homebox"]["error"])
+		self.assertEqual(build_plan(report)["actions"], [])
+
+	def test_malformed_homebox_image_hash_is_not_strong_identity_evidence(self):
+		digest = "c" * 64
+		self.write_item(image_hash=digest)
+		image = self.settings.items_dir / "INV-1" / "images" / "image.jpg"
+		with patch("inventory.refresh.sha256_file", return_value=digest):
+			report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-002", [{"name": "Image SHA-256", "value": f"not-a-hash; {digest[:-1]}x"}])])
+		self.assertEqual(report["matches"]["represented_in_both"], [])
+		self.assertEqual(report["matches"]["local_only"][0]["inventory_id"], "INV-1")
+
+	def test_legacy_retry_group_uses_verified_hashes_and_migrates_only_complete_evidence(self):
+		images = {"one.png": b"one", "two.png": b"two"}
+		for inventory_id, names in (("INV-full", ("one.png", "two.png")), ("INV-one", ("one.png",)), ("INV-two", ("two.png",))):
+			metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True, exist_ok=True)
+			metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+			directory = self.root / "originals" / inventory_id; directory.mkdir(parents=True)
+			for name in names:
+				(directory / name).write_bytes(images[name])
+		hashes = [__import__("hashlib").sha256(value).hexdigest() for value in images.values()]
+		entity_fields = [{"name": "Inventory Item ID", "value": "INV-HIST"}, {"name": "Image SHA-256", "value": "; ".join(hashes)}]
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-009", entity_fields)])
+		self.assertEqual(len(next(entry for entry in report["legacy"]["legacy_candidates"] if entry["inventory_id"] == "INV-full")["hashes"]), 2)
+		plan = build_plan(report)
+		migrations = [action for action in plan["actions"] if action["type"] == "migrate_legacy"]
+		self.assertEqual([(action["inventory_id"], action["entity_id"]) for action in migrations], [("INV-HIST", "hb-1")])
+		self.assertFalse([action for action in plan["actions"] if action["type"] == "adopt_homebox"])
 
 	def test_apply_coalesces_upgrade_and_system_type_tag_normalization_once(self):
 		payload = self.write_item()
