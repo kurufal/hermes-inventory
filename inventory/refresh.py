@@ -395,6 +395,13 @@ def refresh(*, settings=None, homebox_entities=None):
 	if legacy["unresolved_retry_groups"]:
 		proposed_actions.append("inspect_ambiguous_legacy_group")
 	for path, relationship in legacy["relationships"].items():
+		if relationship["classification"] == "matched":
+			payload = _read_json(Path(path)) or {}
+			legacy_asset_id = str(payload.get("asset_id") or "").strip()
+			entity = next((entry for entry in homebox_items if str(entry["entity_id"]) == str(relationship["entity_id"])), None)
+			homebox_asset_id = str((entity or {}).get("asset_id") or "").strip()
+			if _ASSET_RE.fullmatch(legacy_asset_id) and _ASSET_RE.fullmatch(homebox_asset_id) and legacy_asset_id != homebox_asset_id:
+				conflicts.append({"type": "legacy_homebox_asset_id_conflict", "path": path, "entity_id": relationship["entity_id"], "legacy_asset_id": legacy_asset_id, "homebox_asset_id": homebox_asset_id})
 		if relationship["classification"] in {"conflict", "asset_conflict"}:
 			conflicts.append({"type": "legacy_homebox_identity_conflict", "path": path, "entity_ids": relationship["entity_ids"]})
 		elif relationship["classification"] == "stale_link":
@@ -493,29 +500,31 @@ def build_plan(report):
 		metadata_path = Path(legacy["path"])
 		payload = _read_json(metadata_path)
 		inventory_id = str((payload or {}).get("item_id") or (payload or {}).get("inventory_id") or "").strip()
-		asset_id = str((payload or {}).get("asset_id") or "").strip()
+		legacy_asset_id = str((payload or {}).get("asset_id") or "").strip()
 		relationship = report["legacy"].get("relationships", {}).get(legacy["path"], {"classification": "unmatched"})
-		if metadata_path.parent.name != "metadata" or not is_valid_inventory_id(inventory_id) or inventory_id in canonical_ids or not _ASSET_RE.fullmatch(asset_id) or asset_id in report["asset_ids"]["used_locally"]:
+		linked_entity_id = relationship.get("entity_id") if relationship["classification"] == "matched" else None
+		linked = next((entity for entity in report["homebox"]["items"] if str(entity["entity_id"]) == str(linked_entity_id)), None)
+		homebox_asset_id = str((linked or {}).get("asset_id") or "").strip()
+		effective_asset_id = homebox_asset_id if linked_entity_id and not _ASSET_RE.fullmatch(legacy_asset_id) else legacy_asset_id
+		if metadata_path.parent.name != "metadata" or not is_valid_inventory_id(inventory_id) or inventory_id in canonical_ids or not _ASSET_RE.fullmatch(effective_asset_id) or effective_asset_id in report["asset_ids"]["used_locally"]:
 			continue
 		source = metadata_path.parent.parent / "originals" / inventory_id
 		if not source.is_dir():
 			continue
 		if relationship["classification"] in {"conflict", "asset_conflict"} or inventory_id in blocked_inventory_ids:
 			continue
-		linked_entity_id = relationship.get("entity_id") if relationship["classification"] == "matched" else None
 		if linked_entity_id and linked_entity_id in claimed_homebox_entities:
 			continue
-		if not linked_entity_id and asset_id in report["asset_ids"]["used_in_homebox"]:
+		if not linked_entity_id and effective_asset_id in report["asset_ids"]["used_in_homebox"]:
 			continue
-		if linked_entity_id and (linked_entity_id in blocked_entities or asset_id in blocked_assets):
+		if linked_entity_id and (linked_entity_id in blocked_entities or effective_asset_id in blocked_assets):
 			continue
 		images = sorted(path for path in source.iterdir() if path.is_file() and is_supported_image(path))
 		if images:
-			linked = next((entity for entity in report["homebox"]["items"] if str(entity["entity_id"]) == str(linked_entity_id)), None)
 			target_inventory_id = next(iter(_homebox_inventory_ids(linked or {})), inventory_id) if linked_entity_id else inventory_id
 			if target_inventory_id in canonical_ids:
 				continue
-			actions.append({"type": "migrate_legacy", "metadata_path": str(metadata_path), "source_directory": str(source), "inventory_id": target_inventory_id, "asset_id": asset_id, "entity_id": linked_entity_id})
+			actions.append({"type": "migrate_legacy", "metadata_path": str(metadata_path), "source_directory": str(source), "inventory_id": target_inventory_id, "asset_id": effective_asset_id, "entity_id": linked_entity_id})
 			canonical_ids.add(target_inventory_id)
 			if linked_entity_id:
 				entity_ids.add(str(linked_entity_id))

@@ -380,7 +380,7 @@ class RefreshTests(unittest.TestCase):
 	def test_strong_legacy_match_claims_homebox_before_adoption_and_migrates_once(self):
 		inventory_id, asset_id = "INV-20260815-183508-a9f6ceb2", "000-010"
 		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True)
-		metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": asset_id, "result": {"object_type": {"value": "Game"}, "product_or_title": {"value": "Forbidden Desert"}}}), encoding="utf-8")
+		metadata.write_text(json.dumps({"inventory_id": inventory_id, "result": {"object_type": {"value": "Game"}, "product_or_title": {"value": "Forbidden Desert"}}}), encoding="utf-8")
 		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
 		(originals / "one.png").write_bytes(b"one"); (originals / "two.png").write_bytes(b"two")
 		for retry_id, names in (("INV-retry-one", ("one.png",)), ("INV-retry-two", ("two.png",)), ("INV-retry-three", ("one.png",))):
@@ -400,10 +400,40 @@ class RefreshTests(unittest.TestCase):
 		self.assertEqual([action["type"] for action in result["applied"]], ["migrate_legacy"])
 		manifest = json.loads((self.settings.items_dir / inventory_id / "item.json").read_text(encoding="utf-8"))
 		self.assertEqual(manifest["status"], "synced")
+		self.assertEqual(manifest["asset_id"], asset_id)
 		self.assertEqual(manifest["homebox"]["entity_id"], "hb-game")
 		self.assertEqual({image["sha256"] for image in manifest["images"]}, set(hashes))
 		self.assertTrue((originals / "one.png").is_file())
 		self.assertEqual(apply_refresh(settings=self.settings, homebox_entities=entities)["applied"], [])
+
+	def test_matched_legacy_asset_id_disagreement_blocks_migration_and_adoption(self):
+		inventory_id = "INV-asset-conflict"
+		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True)
+		metadata.write_text(json.dumps({"inventory_id": inventory_id, "asset_id": "000-009"}), encoding="utf-8")
+		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+		(originals / "cover.png").write_bytes(b"cover")
+		digest = __import__("hashlib").sha256(b"cover").hexdigest()
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "000-010", [{"name": "Inventory Item ID", "value": inventory_id}, {"name": "Image SHA-256", "value": digest}])])
+		self.assertIn("legacy_homebox_asset_id_conflict", [entry["type"] for entry in report["conflicts"]])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] in {"migrate_legacy", "adopt_homebox"}])
+
+	def test_unmatched_legacy_without_asset_id_is_not_migrated(self):
+		inventory_id = "INV-no-asset"
+		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True)
+		metadata.write_text(json.dumps({"inventory_id": inventory_id}), encoding="utf-8")
+		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+		(originals / "cover.png").write_bytes(b"cover")
+		self.assertFalse([action for action in build_plan(refresh(settings=self.settings, homebox_entities=[]))["actions"] if action["type"] == "migrate_legacy"])
+
+	def test_matched_legacy_without_any_valid_asset_id_is_not_migrated(self):
+		inventory_id = "INV-no-valid-asset"
+		metadata = self.root / "metadata" / f"{inventory_id}.json"; metadata.parent.mkdir(parents=True)
+		metadata.write_text(json.dumps({"inventory_id": inventory_id}), encoding="utf-8")
+		originals = self.root / "originals" / inventory_id; originals.mkdir(parents=True)
+		(originals / "cover.png").write_bytes(b"cover")
+		digest = __import__("hashlib").sha256(b"cover").hexdigest()
+		report = refresh(settings=self.settings, homebox_entities=[entity("hb-1", "not-an-asset", [{"name": "Inventory Item ID", "value": inventory_id}, {"name": "Image SHA-256", "value": digest}])])
+		self.assertFalse([action for action in build_plan(report)["actions"] if action["type"] == "migrate_legacy"])
 
 	def test_ambiguous_legacy_retries_are_visible_and_withhold_homebox_adoption(self):
 		for inventory_id in ("INV-one", "INV-two"):
