@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+import hashlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,28 @@ from inventory.backup import _safe_sources, create_backup, verify_backup
 
 
 class BackupTests(unittest.TestCase):
+	def _archive(self, path, version, *, digest=None):
+		contents = b"canonical evidence"
+		digest = digest or hashlib.sha256(contents).hexdigest()
+		with zipfile.ZipFile(path, "w") as archive:
+			archive.writestr("inventory/item.json", contents)
+			archive.writestr("backup-manifest.json", json.dumps({"schema": "hermes-inventory-backup", "schema_version": version, "files": {"inventory/item.json": digest}}))
+
+	def test_historically_supported_backup_versions_verify(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			for version in (1, 2, 3):
+				path = Path(temporary_directory) / f"v{version}.zip"
+				self._archive(path, version)
+				self.assertEqual(verify_backup(path)["status"], "PASS")
+
+	def test_backup_rejects_unsupported_version_and_checksum_mismatch(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			unsupported = Path(temporary_directory) / "unsupported.zip"
+			self._archive(unsupported, 99)
+			self.assertEqual(verify_backup(unsupported)["status"], "FAIL")
+			mismatched = Path(temporary_directory) / "mismatched.zip"
+			self._archive(mismatched, 3, digest="0" * 64)
+			self.assertEqual(verify_backup(mismatched)["status"], "FAIL")
 	def test_backup_excludes_only_backup_subtree_and_verifies(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			home = Path(temporary_directory); root = home / "inventory"

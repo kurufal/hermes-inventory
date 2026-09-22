@@ -312,16 +312,13 @@ def compare_entity(record, entity):
 def check_homebox_duplicates(record):
 	"""Compare an incoming normalized record with all HomeBox entities."""
 
-	from inventory.homebox import get_entity, list_entities
+	from inventory.homebox import get_entity, list_all_entities
 
-	summaries = list_entities()
+	summaries = list_all_entities()
 
 	candidates = []
 
-	for summary in summaries.get(
-		"items",
-		[],
-	):
+	for summary in summaries:
 		entity_id = summary.get("id")
 
 		if not entity_id:

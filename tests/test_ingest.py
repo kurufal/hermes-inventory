@@ -158,6 +158,8 @@ class IngestCommittedImageTests(unittest.TestCase):
 			return_value={"classification": "NEW_ITEM", "candidates": []},
 		), patch("inventory.ingest.create_entity", side_effect=create), patch(
 			"inventory.ingest.complete_entity", side_effect=complete,
+		), patch(
+			"inventory.homebox.list_all_entities", return_value=[],
 		):
 			return ingest(self.source, object(), settings=self.settings)
 
@@ -225,6 +227,54 @@ class IngestCommittedImageTests(unittest.TestCase):
 			result = ingest(self.source, object(), settings=self.settings)
 		self.assertEqual(result["status"], "existing_item_with_new_image_evidence")
 		self.assertFalse(list(self.settings.items_dir.glob(".tmp-*")))
+
+	def test_all_exact_images_skip_vision_transaction_and_homebox_creation(self):
+		item = self.settings.items_dir / "INV-existing"; images = item / "images"; images.mkdir(parents=True)
+		from inventory.hashing import sha256_file
+		entries = []
+		for source in self.source.glob("*.jpg"):
+			target = images / source.name; target.write_bytes(source.read_bytes())
+			entries.append({"relative_path": f"images/{target.name}", "sha256": sha256_file(target)})
+		(item / "item.json").write_text(json.dumps({"schema": "hermes-inventory-item", "schema_version": 3, "inventory_id": "INV-existing", "asset_id": "000-001", "images": entries}), encoding="utf-8")
+		with patch("inventory.ingest.run_vision", side_effect=AssertionError("vision")), patch("inventory.ingest.begin_item_transaction", side_effect=AssertionError("transaction")), patch("inventory.ingest.create_entity", side_effect=AssertionError("create")):
+			result = ingest(self.source, object(), settings=self.settings)
+		self.assertEqual(result["status"], "exact_image_duplicate")
+		self.assertEqual(result["classification"], "EXACT_IMAGE_DUPLICATE")
+
+	def test_identical_incoming_filenames_bytes_use_one_vision_representative(self):
+		(self.source / "duplicate.jpg").write_bytes((self.source / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").read_bytes())
+		result = self._run_ingest()
+		_, _, manifest = self._assert_canonical_evidence(result)
+		self.assertEqual(len(manifest["images"]), 2)
+
+	def test_copy_checksum_mismatch_stops_before_vision(self):
+		def corrupt_copy(source, destination, images=None):
+			prepare_originals(source, destination, images)
+			(destination / Path(images[0]).name).write_bytes(b"corrupt")
+			return {}
+		with patch("inventory.ingest.prepare_originals", side_effect=corrupt_copy), patch("inventory.ingest.run_vision", side_effect=AssertionError("vision")):
+			with self.assertRaisesRegex(RuntimeError, "checksum mismatch"):
+				ingest(self.source, object(), settings=self.settings)
+
+	def test_same_filename_with_different_bytes_is_not_an_exact_duplicate(self):
+		item = self.settings.items_dir / "INV-existing"; images = item / "images"; images.mkdir(parents=True)
+		filename = "composer_2026-09-01_20-16-27-642_9b27f5.jpg"
+		(images / filename).write_bytes(b"different bytes")
+		from inventory.hashing import sha256_file
+		(item / "item.json").write_text(json.dumps({"schema": "hermes-inventory-item", "schema_version": 3, "inventory_id": "INV-existing", "asset_id": "000-001", "images": [{"relative_path": f"images/{filename}", "sha256": sha256_file(images / filename)}]}), encoding="utf-8")
+		result = self._run_ingest()
+		self.assertEqual(result["status"], "created")
+
+	def test_same_bytes_owned_by_multiple_items_returns_exact_image_conflict(self):
+		from inventory.hashing import sha256_file
+		for item_id in ("INV-one", "INV-two"):
+			item = self.settings.items_dir / item_id; images = item / "images"; images.mkdir(parents=True)
+			image = images / "same.jpg"; image.write_bytes((self.source / "composer_2026-09-01_20-16-27-642_9b27f5.jpg").read_bytes())
+			(item / "item.json").write_text(json.dumps({"schema": "hermes-inventory-item", "schema_version": 3, "inventory_id": item_id, "asset_id": "000-001", "images": [{"relative_path": "images/same.jpg", "sha256": sha256_file(image)}]}), encoding="utf-8")
+		with patch("inventory.ingest.run_vision", side_effect=AssertionError("vision")):
+			result = ingest(self.source, object(), settings=self.settings)
+		self.assertEqual(result["status"], "exact_image_conflict")
+		self.assertEqual(result["classification"], "EXACT_IMAGE_CONFLICT")
 
 
 if __name__ == "__main__":

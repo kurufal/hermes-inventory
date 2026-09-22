@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from inventory.homebox import HomeBoxEnumerationError, list_all_entities
-from inventory.refresh import apply_refresh, build_plan, refresh
+from inventory.refresh import _apply_action, apply_refresh, build_plan, refresh
+from inventory.storage import write_catalog
 
 
 def entity(entity_id, asset_id="", fields=None, name="Item"):
@@ -66,7 +67,7 @@ class RefreshTests(unittest.TestCase):
 	def test_reservations_transactions_and_legacy_are_reported_untouched(self):
 		reservation = self.root / ".asset-id-reservations" / "000-010.json"
 		reservation.parent.mkdir(parents=True)
-		reservation.write_text(json.dumps({"asset_id": "000-010"}), encoding="utf-8")
+		reservation.write_text(json.dumps({"asset_id": "000-010", "reservation_id": "legacy-test", "reserved_at": "2026-09-22T17:00:00Z"}), encoding="utf-8")
 		transaction = self.settings.items_dir / ".tmp-INV-transaction"
 		(transaction / "images").mkdir(parents=True)
 		(transaction / "images" / "photo.jpg").write_bytes(b"photo")
@@ -87,7 +88,7 @@ class RefreshTests(unittest.TestCase):
 	def test_reservation_matching_homebox_is_not_unmatched(self):
 		reservation = self.root / ".asset-id-reservations" / "000-010.json"
 		reservation.parent.mkdir(parents=True)
-		reservation.write_text(json.dumps({"asset_id": "000-010"}), encoding="utf-8")
+		reservation.write_text(json.dumps({"asset_id": "000-010", "reservation_id": "current-test", "reserved_at": "2026-09-22T17:00:00Z"}), encoding="utf-8")
 		report = refresh(settings=self.settings, homebox_entities=[entity("homebox", "000-010")])
 		self.assertEqual(report["reservations"]["entries"][0]["classification"], "reservation_matches_homebox")
 		self.assertFalse(report["reservations"]["unmatched"])
@@ -163,6 +164,61 @@ class RefreshTests(unittest.TestCase):
 		report = refresh(settings=self.settings, homebox_entities=[])
 		self.assertEqual(report["legacy"]["orphaned_evidence"][0]["filename"], "cover.jpg")
 		self.assertTrue(image.exists())
+
+	def test_asset_conflict_summary_includes_all_conflict_shapes(self):
+		self.write_item("INV-1", "000-001")
+		self.write_item("INV-2", "000-001")
+		report = refresh(settings=self.settings, homebox_entities=[entity("one", "000-001"), entity("two", "000-001"), entity("bad", "bad-id")])
+		self.assertIn("000-001", report["asset_ids"]["conflicting"])
+		self.assertIn("bad-id", report["asset_ids"]["conflicting"])
+
+	def test_only_stale_tokenized_orphan_reservation_becomes_cleanup_action(self):
+		reservations = self.root / ".asset-id-reservations"; reservations.mkdir(parents=True)
+		(reservations / "000-010.json").write_text(json.dumps({"asset_id": "000-010", "reservation_id": "stale", "reserved_at": "2000-01-01T00:00:00Z"}), encoding="utf-8")
+		(reservations / "000-011.json").write_text(json.dumps({"asset_id": "000-011"}), encoding="utf-8")
+		report = refresh(settings=self.settings, homebox_entities=[])
+		plan = build_plan(report)
+		self.assertEqual([action["type"] for action in plan["actions"]], ["cleanup_stale_reservation"])
+		self.assertEqual({entry["classification"] for entry in report["reservations"]["entries"]}, {"stale_orphaned_reservation", "legacy_tokenless_reservation"})
+		result = apply_refresh(settings=self.settings, homebox_entities=[])
+		self.assertEqual(result["applied"][0]["type"], "cleanup_stale_reservation")
+		self.assertFalse((reservations / "000-010.json").exists())
+		self.assertTrue((reservations / "000-011.json").exists())
+
+	def test_refresh_normalizes_only_system_type_tags(self):
+		payload = self.write_item()
+		payload["tags"] = [{"name": "Type: Book", "source": "system"}, {"name": "Type: Personal", "source": "user"}]
+		path = self.settings.items_dir / "INV-1" / "item.json"; path.write_text(json.dumps(payload), encoding="utf-8")
+		report = refresh(settings=self.settings, homebox_entities=[])
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "normalize_system_type_tags")
+		_apply_action(action, report, self.settings)
+		self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tags"], [{"name": "Type: Personal", "source": "user"}])
+
+	def test_link_precondition_includes_homebox_identity_evidence(self):
+		self.write_item(identifiers={"serial_number": ["SER-1"]})
+		report = refresh(settings=self.settings, homebox_entities=[entity("one", "000-001", [{"name": "Serial Number", "textValue": "SER-1"}])])
+		action = next(action for action in build_plan(report)["actions"] if action["type"] == "link_homebox")
+		changed = {**report, "homebox": {**report["homebox"], "items": [{**report["homebox"]["items"][0], "fields": [{"name": "Serial Number", "textValue": "DIFFERENT"}]}]}}
+		with self.assertRaisesRegex(RuntimeError, "precondition"):
+			_apply_action(action, changed, self.settings)
+
+	def test_partial_apply_rebuilds_catalog_before_reporting_action_failure(self):
+		payload = self.write_item(); payload["tags"] = [{"name": "Type: Book", "source": "system"}]
+		(self.settings.items_dir / "INV-1" / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		reservation = self.root / ".asset-id-reservations" / "000-010.json"; reservation.parent.mkdir()
+		reservation.write_text(json.dumps({"asset_id": "000-010", "reservation_id": "stale", "reserved_at": "2000-01-01T00:00:00Z"}), encoding="utf-8")
+		calls = []
+		def fail_second(action, report, settings):
+			calls.append(action)
+			if len(calls) == 1:
+				return _apply_action(action, report, settings)
+			raise RuntimeError("injected action failure")
+		with patch("inventory.refresh._apply_action", side_effect=fail_second), patch("inventory.refresh.write_catalog", wraps=write_catalog) as catalog:
+			result = apply_refresh(settings=self.settings, homebox_entities=[])
+		self.assertEqual(result["status"], "ERROR")
+		self.assertEqual(len(result["applied"]), 1)
+		catalog.assert_called()
+		self.assertTrue((self.root / "catalog.json").is_file())
 
 
 class HomeBoxPaginationTests(unittest.TestCase):

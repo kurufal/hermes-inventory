@@ -134,7 +134,10 @@ def _asset_id_available(asset_id, manifest, settings):
 		if candidate.get("inventory_id") != manifest.get("inventory_id") and candidate.get("asset_id") == asset_id:
 			raise ValueError(f"Asset ID is already in use: {asset_id}")
 	try:
+		from inventory.config import homebox_url
 		from inventory.homebox import list_all_entities
+		if not homebox_url():
+			return
 		entities = list_all_entities()
 		for entity in entities if isinstance(entities, list) else []:
 			if str(entity.get("assetId", "")) == asset_id and str(entity.get("id")) != str(manifest.get("homebox", {}).get("entity_id")):
@@ -142,8 +145,7 @@ def _asset_id_available(asset_id, manifest, settings):
 	except ValueError:
 		raise
 	except Exception as exc:
-		if manifest.get("homebox", {}).get("entity_id"):
-			raise RuntimeError("Cannot verify that this Asset ID is globally available because HomeBox could not be completely enumerated.") from exc
+		raise RuntimeError("Cannot verify that this Asset ID is globally available because configured HomeBox state could not be completely enumerated.") from exc
 
 
 def _reconcile_image_names(manifest, images):
@@ -234,7 +236,7 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 		try:
 			completed = complete_entity(entity_id, record, image_directory=images, upload_attachments=resume_attachments, attachment_sync=attachment_sync, on_attachment_uploaded=persist_attachment)
 			manifest.setdefault("homebox", {})["attachment_sync"] = attachment_sync
-			manifest["homebox"]["attachments"] = manifest["homebox"].get("attachments", completed.get("attachments", []))
+			manifest["homebox"]["attachments"] = completed.get("attachments", list(attachment_sync.values()))
 			manifest["status"] = "synced"; manifest["error"] = None
 		except Exception as exc:
 			manifest["status"] = "pending_homebox_sync"; manifest["error"] = str(exc)

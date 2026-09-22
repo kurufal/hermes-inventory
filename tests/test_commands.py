@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from inventory.cli import handle_inventory_cli
-from inventory.commands import inventory_cli, inventory_command
+from inventory.commands import _format_refresh, inventory_cli, inventory_command
 
 
 class InventoryCommandTests(unittest.TestCase):
@@ -27,6 +27,14 @@ class InventoryCommandTests(unittest.TestCase):
 		self.assertIn("Mode: READ-ONLY PREVIEW", result)
 		self.assertIn("No changes were made.", dry_run)
 		self.assertEqual(scanner.call_count, 2)
+
+	def test_refresh_apply_errors_are_not_formatted_as_reconciled(self):
+		report = {"canonical": {"valid_items": []}, "legacy": {"legacy_candidates": []}, "homebox": {"items": [], "complete": True}, "matches": {"homebox_only": [], "local_only": [], "ambiguous": []}, "conflicts": [], "reservations": {"unmatched": []}, "transactions": {"incomplete": []}, "proposed_actions": []}
+		for result in ({"status": "ERROR", "applied": [], "skipped": [{"reason": "backup_verification_failed"}], "backup": {"path": "backup.zip"}}, {"status": "ERROR", "applied": [{"type": "link_homebox"}], "failed": {"action": {"type": "adopt_homebox"}, "error": "boom"}, "skipped": [{"reason": "not_attempted_after_failure"}], "backup": {"path": "backup.zip"}}):
+			output = _format_refresh(report, apply_result=result)
+			self.assertIn("Status: ERROR", output)
+			self.assertNotIn("already reconciled", output)
+		self.assertIn("Remaining actions were not attempted.", _format_refresh(report, apply_result={"status": "ERROR", "applied": [{"type": "link_homebox"}], "failed": {"action": {"type": "adopt_homebox"}, "error": "boom"}, "skipped": [{"reason": "not_attempted_after_failure"}]}))
 
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:

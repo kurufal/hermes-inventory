@@ -74,15 +74,32 @@ def _status(settings):
 	return "\n".join(lines)
 
 
-def _format_refresh(report, *, applied=None):
+def _format_refresh(report, *, apply_result=None):
 	matches = report["matches"]
-	mode = "READ-ONLY PREVIEW" if applied is None else "APPLY"
+	mode = "READ-ONLY PREVIEW" if apply_result is None else "APPLY"
 	lines = ["Hermes Inventory Refresh", f"Mode: {mode}"]
-	if applied is None:
+	if apply_result is None:
 		lines.append("No changes were made.")
 	else:
-		if not applied:
+		status = apply_result.get("status", "ERROR")
+		applied = apply_result.get("applied", [])
+		failed = apply_result.get("failed")
+		skipped = apply_result.get("skipped", [])
+		lines.append(f"Status: {status}")
+		if status != "ERROR" and not applied and not failed and not skipped and apply_result.get("backup") is None and report["homebox"].get("complete") and status == "PASS":
 			lines.append("Inventory is already reconciled.\nNo backup or changes were required.")
+		elif status == "ERROR":
+			lines.append("No reconciliation changes were applied." if not applied else "Reconciliation stopped after partial application.")
+			if failed:
+				lines.extend(["Failed:", f"- {failed.get('action', {}).get('type', 'action')}: {failed.get('error', 'unknown error')}"])
+			elif skipped:
+				reason = skipped[0].get("reason", "refresh_aborted")
+				lines.append(f"Reason: {reason.replace('_', ' ')}.")
+			lines.append("Run /inventory refresh again.")
+		if applied:
+			lines.extend(["Applied:", *[f"- {action.get('type', 'action')}" for action in applied]])
+		if failed and any(entry.get("reason") == "not_attempted_after_failure" for entry in skipped):
+			lines.append("Remaining actions were not attempted.")
 		lines.extend(["", f"Canonical items: {len(report['canonical']['valid_items'])}", f"Legacy candidates: {len(report['legacy']['legacy_candidates'])}", f"HomeBox items: {len(report['homebox']['items'])}", f"HomeBox-only items: {len(matches['homebox_only'])}", f"Local-only items: {len(matches['local_only'])}", f"Asset ID conflicts: {len(report['conflicts'])}", f"Unmatched reservations: {len(report['reservations']['unmatched'])}", f"Incomplete transactions: {len(report['transactions']['incomplete'])}", f"Ambiguous matches: {len(matches['ambiguous'])}"])
 	if not report["homebox"]["complete"]:
 		lines.append("[WARN] HomeBox enumeration incomplete; no globally safe next Asset ID is reported.")
@@ -197,7 +214,7 @@ def inventory_command(raw_args="", **kwargs):
 		if operation == "--dry-run":
 			return _format_refresh(refresh(settings=settings))
 		result = apply_refresh(settings=settings)
-		lines = _format_refresh(result["report"], applied=result["applied"])
+		lines = _format_refresh(result.get("final_report", result["report"]), apply_result=result)
 		if result.get("backup"):
 			lines += f"\n\nBackup:\n{result['backup']['path']}\nBackup verification: {result.get('backup_verification', {}).get('status', 'not_run')}"
 		return lines

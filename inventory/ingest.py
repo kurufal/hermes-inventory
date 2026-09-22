@@ -11,6 +11,7 @@ from inventory.constants import OBSERVATION_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSI
 from inventory.duplicates import check_homebox_duplicates
 from inventory.homebox import complete_entity, create_entity
 from inventory.image_identity import canonical_image_index, incoming_images
+from inventory.hashing import sha256_file
 from inventory.media import is_supported_image
 from inventory.normalize import normalize_record
 from inventory.storage import (
@@ -103,6 +104,9 @@ def ingest(source_directory, vision_client, *, settings=None):
 	reservation = None
 	try:
 		provenance = prepare_originals(source_directory, images_dir, [entry["path"] for entry in incoming])
+		for entry in incoming:
+			if sha256_file(images_dir / entry["path"].name) != entry["sha256"]:
+				raise RuntimeError(f"Copied image checksum mismatch: {entry['path'].name}")
 		raw, metadata_path = run_vision(images_dir, vision_client, metadata_path=transaction / "vision.json")
 		raw["item_id"] = item_id
 		atomic_json_write(metadata_path, raw)

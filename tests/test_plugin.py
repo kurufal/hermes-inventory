@@ -110,7 +110,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		second = composer / "composer_2026-09-01_20-16-27-691_575083.png"
 		first.write_bytes(b"first")
 		second.write_bytes(b"second")
-		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False):
+		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False), patch("inventory.config.sys.platform", "win32"):
 			result, seen, _ = self.run_ingest([str(first), str(second)])
 		self.assertIn('"created": true', result)
 		self.assertEqual(set(seen["staged_names"]), {first.name, second.name})

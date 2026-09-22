@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from inventory.config import get_settings
-from inventory.constants import ITEM_SCHEMA, OBSERVATION_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
+from inventory.constants import ITEM_SCHEMA, OBSERVATION_SCHEMA, PLUGIN_VERSION, SCHEMA_VERSION, STALE_RESERVATION_AGE_SECONDS, SUPPORTED_ITEM_SCHEMA_VERSIONS, SUPPORTED_OBSERVATION_SCHEMA_VERSIONS
 from inventory.hashing import sha256_file
 from inventory.identity import match_manifest
 from inventory.storage import _ASSET_RE, atomic_json_write, begin_item_transaction, build_manifest, canonicalize_images, commit_item_transaction, upgrade_manifest_schema, write_catalog
@@ -132,19 +132,34 @@ def _legacy_scan(root, canonical_paths):
 	return result
 
 
-def _reservation_scan(root, local_assets, homebox_assets):
+def _reservation_scan(root, local_assets, homebox_assets, transactions=()):
 	reservations, unmatched = [], []
 	for path in sorted((root / ".asset-id-reservations").glob("*.json")) if (root / ".asset-id-reservations").exists() else []:
 		payload = _read_json(path)
 		asset_id = str((payload or {}).get("asset_id") or path.stem)
-		if not _ASSET_RE.fullmatch(asset_id):
+		if payload is None or not _ASSET_RE.fullmatch(asset_id):
 			reservations.append({"path": str(path), "classification": "malformed_reservation"})
+			continue
+		reservation_id = str(payload.get("reservation_id") or "").strip()
+		if not reservation_id:
+			reservations.append({"path": str(path), "asset_id": asset_id, "classification": "legacy_tokenless_reservation"})
+			continue
+		try:
+			reserved_at = datetime.fromisoformat(str(payload.get("reserved_at", "")).replace("Z", "+00:00"))
+			if reserved_at.tzinfo is None:
+				raise ValueError
+			age_seconds = (datetime.now(UTC) - reserved_at.astimezone(UTC)).total_seconds()
+		except (TypeError, ValueError):
+			reservations.append({"path": str(path), "asset_id": asset_id, "classification": "malformed_reservation"})
 			continue
 		in_local, in_homebox = asset_id in local_assets, asset_id in homebox_assets
 		classification = "reservation_matches_both" if in_local and in_homebox else "reservation_matches_canonical" if in_local else "reservation_matches_homebox" if in_homebox else "reservation_unmatched"
-		entry = {"path": str(path), "asset_id": asset_id, "classification": classification}
+		associated_transaction = any(entry.get("asset_id") == asset_id for entry in transactions)
+		if classification == "reservation_unmatched" and age_seconds >= STALE_RESERVATION_AGE_SECONDS and not associated_transaction:
+			classification = "stale_orphaned_reservation"
+		entry = {"path": str(path), "asset_id": asset_id, "reservation_id": reservation_id, "reserved_at": reserved_at.isoformat().replace("+00:00", "Z"), "classification": classification}
 		reservations.append(entry)
-		if classification == "reservation_unmatched":
+		if classification in {"reservation_unmatched", "stale_orphaned_reservation"}:
 			unmatched.append(entry)
 	return reservations, unmatched
 
@@ -159,7 +174,7 @@ def _transactions(settings):
 			age = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat().replace("+00:00", "Z")
 		except OSError:
 			age = None
-		entries.append({"path": str(path), "inventory_id": (manifest or {}).get("inventory_id"), "has_item_json": (path / "item.json").is_file(), "has_vision_json": (path / "vision.json").is_file(), "image_count": len(list((path / "images").glob("*"))) if (path / "images").is_dir() else 0, "modified_at": age})
+		entries.append({"path": str(path), "inventory_id": (manifest or {}).get("inventory_id"), "asset_id": (manifest or {}).get("asset_id"), "has_item_json": (path / "item.json").is_file(), "has_vision_json": (path / "vision.json").is_file(), "image_count": len(list((path / "images").glob("*"))) if (path / "images").is_dir() else 0, "modified_at": age})
 	return entries
 
 
@@ -190,8 +205,9 @@ def local_diagnostics(*, settings=None):
 	canonical = _canonical_scan(settings)
 	local_assets = {item["asset_id"] for item in canonical["valid_items"] if _ASSET_RE.fullmatch(item["asset_id"])}
 	legacy = _legacy_scan(settings.persistent_data_dir, [Path(item["path"]) for item in canonical["valid_items"]])
-	reservations, unmatched = _reservation_scan(settings.persistent_data_dir, local_assets, set())
-	return {"legacy_candidates": legacy["legacy_candidates"], "unmatched_reservations": unmatched, "incomplete_transactions": _transactions(settings), "reservations": reservations}
+	transactions = _transactions(settings)
+	reservations, unmatched = _reservation_scan(settings.persistent_data_dir, local_assets, set(), transactions)
+	return {"legacy_candidates": legacy["legacy_candidates"], "unmatched_reservations": unmatched, "incomplete_transactions": transactions, "reservations": reservations}
 
 
 def refresh(*, settings=None, homebox_entities=None):
@@ -213,7 +229,8 @@ def refresh(*, settings=None, homebox_entities=None):
 	homebox_asset_values = [str(entity.get("assetId", "")) for entity in homebox_entities if entity.get("assetId")]
 	homebox_assets = {asset_id for asset_id in homebox_asset_values if _ASSET_RE.fullmatch(asset_id)}
 	malformed_homebox_assets = sorted(asset_id for asset_id in homebox_asset_values if not _ASSET_RE.fullmatch(asset_id))
-	reservations, unmatched_reservations = _reservation_scan(settings.persistent_data_dir, local_assets, homebox_assets)
+	transactions = _transactions(settings)
+	reservations, unmatched_reservations = _reservation_scan(settings.persistent_data_dir, local_assets, homebox_assets, transactions)
 	reserved_assets = {entry["asset_id"] for entry in reservations if entry.get("asset_id")}
 	matches = {"represented_in_both": [], "local_only": [], "homebox_only": [], "ambiguous": [], "conflicts": []}
 	matched_homebox_ids = set()
@@ -250,8 +267,7 @@ def refresh(*, settings=None, homebox_entities=None):
 		if not paired:
 			conflicts.append({"type": "unmatched_local_homebox_asset_id", "asset_id": asset_id})
 	asset_ids = _asset_report(local_assets, homebox_assets, reserved_assets, homebox_complete)
-	transactions = _transactions(settings)
-	asset_ids["conflicting"] = sorted({value for conflict in conflicts for value in (conflict.get("local_asset_id"), conflict.get("homebox_asset_id")) if value})
+	asset_ids["conflicting"] = sorted({str(value) for conflict in conflicts for value in (conflict.get("asset_id"), conflict.get("local_asset_id"), conflict.get("homebox_asset_id")) if value})
 	proposed_actions = []
 	if legacy["legacy_candidates"]:
 		proposed_actions.append("migrate_legacy_record")
@@ -307,6 +323,8 @@ def build_plan(report):
 	for item in report["canonical"]["valid_items"]:
 		if item["manifest"].get("schema_version") != SCHEMA_VERSION:
 			actions.append({"type": "upgrade_manifest", "path": item["path"], "inventory_id": item["inventory_id"]})
+		if any(isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: ") for tag in item["manifest"].get("tags", [])):
+			actions.append({"type": "normalize_system_type_tags", "path": item["path"], "inventory_id": item["inventory_id"]})
 	for entry in report["matches"]["represented_in_both"]:
 		item = next(item for item in report["canonical"]["valid_items"] if item["inventory_id"] == entry["inventory_id"])
 		if not item.get("homebox_entity_id"):
@@ -337,6 +355,9 @@ def build_plan(report):
 		if images:
 			actions.append({"type": "migrate_legacy", "metadata_path": str(metadata_path), "source_directory": str(source), "inventory_id": inventory_id, "asset_id": asset_id})
 			canonical_ids.add(inventory_id)
+	for reservation in report["reservations"]["entries"]:
+		if reservation.get("classification") == "stale_orphaned_reservation":
+			actions.append({"type": "cleanup_stale_reservation", "path": reservation["path"], "asset_id": reservation["asset_id"], "reservation_id": reservation["reservation_id"]})
 	for action in actions:
 		action["precondition"] = _action_precondition(action, report)
 	return {"actions": actions, "skipped": skipped, "fingerprint": _fingerprint(actions)}
@@ -349,18 +370,39 @@ def _path_digest(path):
 		return None
 
 
+def _identity_snapshot(entity):
+	fields = entity.get("fields", []) if isinstance(entity, dict) else []
+	values = {}
+	for field in fields:
+		if not isinstance(field, dict):
+			continue
+		name = str(field.get("name", "")).casefold()
+		if name in {"inventory item id", "image sha-256", "serial number"}:
+			values.setdefault(name, []).append(str(field.get("textValue", field.get("numberValue", ""))).strip())
+	return {"entity_id": str(entity.get("entity_id", entity.get("id", ""))), "asset_id": entity.get("asset_id", entity.get("assetId")), "fields": {name: sorted(value for value in entries if value) for name, entries in sorted(values.items())}}
+
+
 def _action_precondition(action, report):
 	"""Digest only evidence an action is allowed to mutate or depend on."""
 	payload = {"type": action["type"]}
 	if action["type"] in {"upgrade_manifest", "link_homebox"}:
 		payload["manifest"] = _path_digest(action["path"])
 		payload["entity_id"] = action.get("entity_id")
+	if action["type"] == "link_homebox":
+		entity = next((entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == str(action["entity_id"])), None)
+		payload["identity"] = _identity_snapshot(entity or {})
+	if action["type"] == "normalize_system_type_tags":
+		payload["manifest"] = _path_digest(action["path"])
 	if action["type"] == "adopt_homebox":
 		payload["entity"] = next((entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == str(action["entity_id"])), None)
 		payload["destination_exists"] = any(item["inventory_id"] == action["inventory_id"] for item in report["canonical"]["valid_items"])
 	if action["type"] == "migrate_legacy":
 		payload["metadata"] = _path_digest(action["metadata_path"])
 		payload["images"] = [(path.name, _path_digest(path)) for path in sorted(Path(action["source_directory"]).iterdir()) if path.is_file() and is_supported_image(path)] if Path(action["source_directory"]).is_dir() else None
+	if action["type"] == "cleanup_stale_reservation":
+		payload["reservation"] = _path_digest(action["path"])
+		payload["asset_id"] = action["asset_id"]
+		payload["reservation_id"] = action["reservation_id"]
 	return _fingerprint([payload])
 
 
@@ -379,6 +421,17 @@ def _apply_action(action, report, settings):
 		path = Path(action["path"]); manifest = upgrade_manifest_schema(_read_json(path))
 		manifest.setdefault("homebox", {})["entity_id"] = action["entity_id"]
 		atomic_json_write(path, manifest)
+	elif action["type"] == "normalize_system_type_tags":
+		path = Path(action["path"])
+		manifest = upgrade_manifest_schema(_read_json(path))
+		manifest["tags"] = [tag for tag in manifest.get("tags", []) if not (isinstance(tag, dict) and tag.get("source") == "system" and str(tag.get("name", "")).startswith("Type: "))]
+		atomic_json_write(path, manifest)
+	elif action["type"] == "cleanup_stale_reservation":
+		path = Path(action["path"])
+		payload = _read_json(path)
+		if not isinstance(payload, dict) or payload.get("asset_id") != action["asset_id"] or payload.get("reservation_id") != action["reservation_id"]:
+			raise RuntimeError("Reservation changed during refresh")
+		path.unlink()
 	elif action["type"] == "adopt_homebox":
 		entity = next(entry for entry in report["homebox"]["items"] if str(entry["entity_id"]) == action["entity_id"])
 		transaction = begin_item_transaction(action["inventory_id"], settings)
@@ -442,8 +495,17 @@ def apply_refresh(*, settings=None, homebox_entities=None):
 		except Exception as exc:
 			failed = {"action": action, "error": f"{type(exc).__name__}: {exc}"}
 			remaining = [{"reason": "not_attempted_after_failure", "action": entry} for entry in plan["actions"][index + 1:]]
+			catalog_error = None
+			if applied:
+				try:
+					write_catalog(settings)
+				except Exception as catalog_exc:
+					catalog_error = f"{type(catalog_exc).__name__}: {catalog_exc}"
 			final = refresh(settings=settings, homebox_entities=homebox_entities)
-			return {"mode": "apply", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": applied, "failed": failed, "skipped": [*plan["skipped"], *remaining], "report": final, "final_report": final}
+			result = {"mode": "apply", "status": "ERROR", "backup": backup, "backup_verification": verification, "applied": applied, "failed": failed, "skipped": [*plan["skipped"], *remaining], "report": final, "final_report": final}
+			if catalog_error:
+				result["catalog_error"] = catalog_error
+			return result
 	write_catalog(settings)
 	final = refresh(settings=settings, homebox_entities=homebox_entities)
 	return {"mode": "apply", "status": final["status"], "backup": backup, "backup_verification": verification, "applied": applied, "failed": failed, "skipped": plan["skipped"], "report": final, "final_report": final}

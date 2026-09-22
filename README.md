@@ -144,7 +144,7 @@ Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging 
 
 `/inventory refresh --dry-run` is a read-only reconciliation preview. It compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records.
 
-`/inventory refresh` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, and rebuild the local catalog. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
+`/inventory refresh` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, normalize old system-owned `Type: ` tags, remove only provably stale tokenized orphan Asset ID reservations, and rebuild the local catalog. Tokenless legacy reservations, malformed reservations, incomplete transactions, and historical duplicate image evidence are reported but never automatically deleted. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
 
 HomeBox adoption stores the existing HomeBox metadata locally but does not download attachments as immutable originals. Adopted schema-v3 records can therefore have no local images or vision result; local search remains canonical/local. Existing schema-v1 and schema-v2 photographed records remain readable.
 
@@ -162,9 +162,9 @@ Edits are marked user-owned and survive later reanalysis. Supported corrections 
 
 **Asset ID vs Inventory ID:** `000-011` is the human-friendly Asset ID used in conversation and HomeBox. `INV-20260901-204535-601208be` is the immutable Inventory ID used for durable storage and recovery.
 
-Inventory normalizes types to Book, Board Game, Video Game, Figure / Statue, Collectible, Electronics, Computer Hardware, Tool, Appliance, Media, Toy, or Other. The managed `Type: Book` tag (or corresponding type) and explicit user tags such as `Cyberpunk` synchronize to HomeBox. Existing unrelated HomeBox tags are preserved.
+Inventory normalizes types to Book, Board Game, Video Game, Figure / Statue, Collectible, Electronics, Computer Hardware, Tool, Appliance, Media, Toy, or Other. Category is the canonical item type; explicit local tags such as `Cyberpunk` are user tags. Existing unrelated HomeBox tags are preserved.
 
-HomeBox owns the tag vocabulary. Create tags in HomeBox, then Inventory matches existing tags by name and does not create new HomeBox tags automatically. The canonical category is matched directly, so local `Book` classification uses a HomeBox `Book` tag when it exists; explicit user tags follow the same rule.
+HomeBox owns the tag vocabulary. Inventory matches category and explicit user tags separately against existing HomeBox tags by name and never creates HomeBox tags automatically. The canonical category is matched directly, so local `Book` classification uses a HomeBox `Book` tag when it exists.
 
 ## Search
 
@@ -181,11 +181,11 @@ Search matches Asset ID, Inventory ID, names, descriptions, categories, identifi
 
 Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg` and `000-011_cyberpunk-2077-no-coincidence_copyright-isbn-page.jpg`. Manifests retain original filenames and hashes, which remain stronger recovery signals than filenames. Primary/display image selection is managed through the HomeBox UI. Inventory never reorders or changes HomeBox primary attachments.
 
-Resync updates metadata without re-uploading existing attachments. The installed HomeBox integration has no verified attachment-metadata rename contract, so attachment display names are not renamed automatically; local canonical filenames remain authoritative.
+Exact SHA-256 image preflight runs before vision. All-exact incoming evidence can stop before vision; identical bytes are intentionally not stored again as another canonical image. Mixed old/new evidence is not automatically merged into an existing item. Perceptually similar but byte-different or re-encoded images are not automatic duplicates. Attachment retries use SHA-256-keyed `attachment_sync` state, so a pending resync skips already uploaded bytes and uploads only missing images. The installed HomeBox integration has no verified attachment-metadata rename contract, so attachment display names are not renamed automatically; local canonical filenames remain authoritative.
 
 ## Backup and Recovery
 
-Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Backups exclude runtime state and secrets; recovery is non-destructive.
+Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.4.0.
 
 ## Advanced Configuration
 

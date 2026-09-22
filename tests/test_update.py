@@ -87,6 +87,18 @@ class InventoryUpdateTests(unittest.TestCase):
 		with self.assertRaisesRegex(ValueError, "already in use"):
 			update_item("000-011", "edit", {"asset_id": "000-025"}, settings=self.settings)
 
+	def test_asset_id_edit_fails_closed_when_configured_homebox_unavailable(self):
+		with patch("inventory.config.homebox_url", return_value="http://homebox"), patch("inventory.homebox.list_all_entities", side_effect=RuntimeError("offline")):
+			with self.assertRaisesRegex(RuntimeError, "configured HomeBox"):
+				update_item("000-011", "edit", {"asset_id": "000-026"}, settings=self.settings)
+
+	def test_asset_id_edit_allows_unconfigured_local_only_and_rejects_homebox_collision(self):
+		with patch("inventory.config.homebox_url", return_value=""), patch("inventory.homebox.list_all_entities", side_effect=AssertionError("not configured")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			update_item("000-011", "edit", {"asset_id": "000-026"}, settings=self.settings)
+		with patch("inventory.config.homebox_url", return_value="http://homebox"), patch("inventory.homebox.list_all_entities", return_value=[{"id": "different", "assetId": "000-027"}]):
+			with self.assertRaisesRegex(ValueError, "HomeBox"):
+				update_item("000-026", "edit", {"asset_id": "000-027"}, settings=self.settings)
+
 	def test_edit_renames_images_and_retains_hash_and_provenance(self):
 		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
 			update_item("000-011", "edit", {"name": "Cyberpunk / No: Coincidence", "asset_id": "000-025"}, settings=self.settings)
@@ -126,6 +138,22 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(result["status"], "updated")
 		self.assertEqual(manifest["status"], "pending_homebox_sync")
 		self.assertEqual(manifest["purchase_price"], 14.99)
+
+	def test_pending_resync_skips_recorded_attachment_hash_and_persists_completion(self):
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		payload["status"] = "pending_homebox_sync"
+		payload["homebox"] = {"entity_id": "entity-1", "attachments": [], "attachment_sync": {"x": {"filename": "old-front.jpg", "sha256": "x", "result": {"id": "a"}}}}
+		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		def complete(entity_id, record, **kwargs):
+			self.assertTrue(kwargs["upload_attachments"])
+			self.assertIn("x", kwargs["attachment_sync"])
+			kwargs["on_attachment_uploaded"]({"filename": "old-page.jpg", "sha256": "y", "result": {"id": "b"}, "primary": False})
+			return {"attachments": list(kwargs["attachment_sync"].values()) + [{"filename": "old-page.jpg", "sha256": "y", "result": {"id": "b"}, "primary": False}]}
+		with patch("inventory.homebox.complete_entity", side_effect=complete):
+			update_item("000-011", "resync", settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(set(manifest["homebox"]["attachment_sync"]), {"x", "y"})
+		self.assertEqual({entry["sha256"] for entry in manifest["homebox"]["attachments"]}, {"x", "y"})
 
 	def test_partial_attributes_merge_case_insensitively_without_duplicates(self):
 		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["attributes"] += [{"name": "Edition", "value": "First"}, {"name": "Language", "value": "English"}]
