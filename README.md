@@ -2,6 +2,10 @@
 
 Hermes Inventory catalogs photographs of physical items in HomeBox. It keeps durable original images, vision metadata, manifests, receipts, and backups separately from Hermes operational media.
 
+## Documentation
+
+This is the v0.5.0 documentation pass. See the [flow guide](docs/flows.md) for setup, command, tool, and reconciliation diagrams. See the [POAM](docs/POAM.md) for planned work and milestones; it distinguishes future items from current functionality.
+
 ## Quick Start: Windows Hermes Desktop
 
 ### Step 1: Open the Agent plugin folder
@@ -187,7 +191,7 @@ Exact SHA-256 image preflight runs before vision. All-exact incoming evidence ca
 
 ## Backup and Recovery
 
-Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.4.1.
+Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.5.0.
 
 ## Advanced Configuration
 
