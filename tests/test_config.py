@@ -16,9 +16,9 @@ class InventorySettingsTests(unittest.TestCase):
 	def test_environment_paths_override_and_separate_runtime(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			home = Path(temporary_directory) / "Hermes Home"
-			with patch.dict(os.environ, {"HERMES_HOME": str(home), "INVENTORY_BASE_DIR": "\\\\NAS\\Inventory\\Anime Figures", "INVENTORY_RUNTIME_DIR": str(home / "runtime")}, clear=True):
+			with patch.dict(os.environ, {"HERMES_HOME": str(home), "INVENTORY_BASE_DIR": "\\\\Server\\Share\\Example Collection", "INVENTORY_RUNTIME_DIR": str(home / "runtime")}, clear=True):
 				settings = get_settings()
-			self.assertEqual(str(settings.persistent_data_dir), "\\\\NAS\\Inventory\\Anime Figures")
+			self.assertEqual(str(settings.persistent_data_dir), "\\\\Server\\Share\\Example Collection")
 			self.assertEqual(settings.runtime_dir, home / "runtime")
 			self.assertNotEqual(settings.runtime_dir, settings.persistent_data_dir)
 
@@ -40,7 +40,7 @@ class InventorySettingsTests(unittest.TestCase):
 			config = home / "inventory-config.json"
 			config.write_text('{"storage":{"runtime_dir":"C:\\\\Runtime"},"toon":{"enabled":false},"future":{"value":1}}', encoding="utf-8")
 			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=False):
-				unc = Path("\\\\truenas\\Inventory\\Anime Figures")
+				unc = Path("\\\\Server\\Share\\Example Collection")
 				write_storage_config(unc)
 				self.assertEqual(str(get_settings().persistent_data_dir), str(unc))
 			payload = __import__("json").loads(config.read_text(encoding="utf-8"))
@@ -98,6 +98,45 @@ class InventorySettingsTests(unittest.TestCase):
 			(home / ".env").write_text("HOMEBOX_API_KEY=configured-secret\n", encoding="utf-8")
 			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=True):
 				self.assertEqual(homebox_api_key(), "configured-secret")
+	def test_legacy_credential_exports_are_not_cached(self):
+		import inventory.config as config
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			dotenv = Path(temporary_directory) / ".env"
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
+				for suffix in ("first", "second"):
+					dotenv.write_text(f"HOMEBOX_URL=http://{suffix}\nHOMEBOX_API_KEY=hb_{suffix}\n", encoding="utf-8")
+					self.assertEqual(config.HOMEBOX_URL, f"http://{suffix}")
+					self.assertEqual(config.HOMEBOX_API_KEY, f"hb_{suffix}")
+	def test_optional_write_does_not_cache_file_only_credentials(self):
+		from inventory.config import homebox_api_key, write_homebox_api_key
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
+				write_homebox_api_key("hb_first")
+				self.assertEqual(homebox_api_key(), "hb_first")
+				self.assertNotIn("HOMEBOX_API_KEY", os.environ)
+				(Path(temporary_directory) / ".env").write_text("HOMEBOX_API_KEY=hb_changed\n", encoding="utf-8")
+				self.assertEqual(homebox_api_key(), "hb_changed")
+
+	def test_optional_write_refreshes_existing_process_override_with_hermes_helper(self):
+		from inventory.config import homebox_api_key, write_homebox_api_key
+		helper = SimpleNamespace(save_env_value=lambda name, value: None)
+		with patch.dict(sys.modules, {"hermes_cli.config": helper}), patch.dict(os.environ, {"HOMEBOX_API_KEY": "hb_old"}, clear=False):
+			write_homebox_api_key("hb_new", SimpleNamespace())
+			self.assertEqual(homebox_api_key(), "hb_new")
+
+	def test_optional_writer_updates_exported_key_without_losing_other_values(self):
+		from dotenv import dotenv_values
+		from inventory.config import write_homebox_api_key
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			dotenv = Path(temporary_directory) / ".env"
+			dotenv.write_text("# Hermes settings\nAPI_SERVER_KEY=unrelated\nexport HOMEBOX_API_KEY = 'hb_old'\n", encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
+				write_homebox_api_key("hb_new")
+			values = dotenv_values(dotenv)
+			self.assertEqual(values["HOMEBOX_API_KEY"], "hb_new")
+			self.assertEqual(values["API_SERVER_KEY"], "unrelated")
+			self.assertIn("# Hermes settings", dotenv.read_text(encoding="utf-8"))
+			self.assertEqual([path.name for path in dotenv.parent.iterdir()], [".env"])
 
 	def test_homebox_environment_url_overrides_plugin_json_for_docker(self):
 		from inventory.config import homebox_url
@@ -106,6 +145,35 @@ class InventorySettingsTests(unittest.TestCase):
 			(home / "inventory-config.json").write_text('{"homebox":{"url":"http://desktop-host"}}', encoding="utf-8")
 			with patch.dict(os.environ, {"HERMES_HOME": str(home), "HOMEBOX_URL": "http://docker-host"}, clear=True):
 				self.assertEqual(homebox_url(), "http://docker-host")
+	def test_dotenv_loads_both_homebox_values_and_reloads_changes(self):
+		from inventory.config import homebox_api_key, homebox_url
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			home = Path(temporary_directory)
+			dotenv = home / ".env"
+			(home / "inventory-config.json").write_text('{"homebox":{"url":"http://fallback"}}', encoding="utf-8")
+			dotenv.write_text('export HOMEBOX_URL="http://homebox:3100"\nHOMEBOX_API_KEY = \'hb_test\' # comment\n', encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": str(home)}, clear=True):
+				self.assertEqual(homebox_url(), "http://homebox:3100")
+				self.assertEqual(homebox_api_key(), "hb_test")
+				dotenv.write_text('HOMEBOX_API_KEY="hb_changed"\n', encoding="utf-8")
+				self.assertEqual(homebox_api_key(), "hb_changed")
+				self.assertEqual(homebox_url(), "http://fallback")
+
+	def test_process_environment_overrides_dotenv_and_hermes_helper(self):
+		from inventory.config import homebox_api_key, homebox_url
+		helper = SimpleNamespace(get_env_value=lambda name: "helper-value")
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			(Path(temporary_directory) / ".env").write_text("HOMEBOX_API_KEY=hb_file\nHOMEBOX_URL=http://file\n", encoding="utf-8")
+			with patch.dict(sys.modules, {"hermes_cli.config": helper}), patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_API_KEY": "hb_process", "HOMEBOX_URL": "http://process"}, clear=True):
+				self.assertEqual(homebox_api_key(), "hb_process")
+				self.assertEqual(homebox_url(), "http://process")
+
+	def test_hermes_server_key_is_not_a_homebox_credential(self):
+		from inventory.config import homebox_api_key
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			(Path(temporary_directory) / ".env").write_text("API_SERVER_KEY=server-only\n", encoding="utf-8")
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "API_SERVER_KEY": "server-only"}, clear=True):
+				self.assertEqual(homebox_api_key(), "")
 
 	def test_homebox_secret_uses_hermes_environment_helper_when_available(self):
 		from inventory.config import write_homebox_api_key

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import json
 import re
@@ -13,6 +12,8 @@ from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from dotenv import dotenv_values, set_key
 
 
 def resolve_hermes_home() -> Path:
@@ -78,6 +79,8 @@ def _load_config_document(hermes_home: Path) -> tuple[dict[str, Any], Path]:
 
 def environment_value(name: str) -> str:
 	"""Read a Hermes-managed environment value without import-time caching."""
+	if name in os.environ:
+		return os.environ[name]
 	try:
 		from hermes_cli.config import get_env_value
 		value = get_env_value(name)
@@ -91,7 +94,10 @@ def environment_value(name: str) -> str:
 				return str(value)
 		except (ImportError, AttributeError, TypeError):
 			pass
-	return os.environ.get(name, "")
+	try:
+		return dotenv_values(resolve_hermes_home() / ".env", interpolate=False).get(name) or ""
+	except OSError:
+		return ""
 
 
 def _boolean(value: Any, name: str, default: bool = False) -> bool:
@@ -145,18 +151,14 @@ def normalize_homebox_url(value: str) -> str:
 		if label != target:
 			raise ConfigurationError("HomeBox URL link text and target must match")
 		text = target
-	parsed = urlparse(text)
-	if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+	try:
+		parsed = urlparse(text)
+		valid = parsed.scheme in {"http", "https"} and parsed.hostname and not (parsed.username or parsed.password or parsed.query or parsed.fragment) and (parsed.port is None or parsed.port > 0)
+	except ValueError:
+		valid = False
+	if not valid or any(character.isspace() or ord(character) < 32 for character in text):
 		raise ConfigurationError("HomeBox URL must be an HTTP or HTTPS URL")
 	return text.rstrip("/")
-
-
-def _non_negative_float(value: Any, default: float) -> float:
-	try:
-		parsed = float(value)
-	except (TypeError, ValueError):
-		return default
-	return parsed if math.isfinite(parsed) and parsed >= 0 else default
 
 
 @dataclass(frozen=True)
@@ -169,19 +171,11 @@ class InventorySettings:
 	persistent_source: str
 	runtime_source: str
 	backup_source: str
-	watch_interval_seconds: float
-	batch_window_seconds: float
-	pending_ttl_seconds: float
-	state_retention_seconds: float
 	toon_enabled: bool
 
 	@property
 	def hermes_images_dir(self) -> Path:
 		return self.hermes_home / "images"
-
-	@property
-	def pending_upload_state_path(self) -> Path:
-		return self.runtime_dir / "pending-uploads.json"
 
 	@property
 	def items_dir(self) -> Path:
@@ -209,10 +203,6 @@ def get_settings() -> InventorySettings:
 		hermes_home=hermes_home, persistent_data_dir=persistent, runtime_dir=runtime,
 		backup_dir=backup, config_path=config_path, persistent_source=persistent_source,
 		runtime_source=runtime_source, backup_source=backup_source,
-		watch_interval_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_WATCH_INTERVAL_SECONDS", _nested_value(config, "uploads", "watch_interval_seconds", 1)), 1),
-		batch_window_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_BATCH_WINDOW_SECONDS", _nested_value(config, "uploads", "batch_window_seconds", 10)), 10),
-		pending_ttl_seconds=_non_negative_float(os.environ.get("INVENTORY_PENDING_UPLOAD_TTL_SECONDS", _nested_value(config, "uploads", "pending_ttl_seconds", 300)), 300),
-		state_retention_seconds=_non_negative_float(os.environ.get("INVENTORY_UPLOAD_STATE_RETENTION_SECONDS", _nested_value(config, "uploads", "state_retention_seconds", 86400)), 86400),
 		toon_enabled=_boolean(_nested_value(config, "toon", "enabled", False), "toon.enabled"),
 	)
 
@@ -227,16 +217,7 @@ def homebox_url(settings: InventorySettings | None = None) -> str:
 
 
 def homebox_api_key() -> str:
-	value = environment_value("HOMEBOX_API_KEY")
-	if value:
-		return value
-	try:
-		for line in (resolve_hermes_home() / ".env").read_text(encoding="utf-8").splitlines():
-			if line.startswith("HOMEBOX_API_KEY="):
-				return line.partition("=")[2]
-	except OSError:
-		pass
-	return ""
+	return environment_value("HOMEBOX_API_KEY").strip()
 
 
 def _write_config_document(settings: InventorySettings, payload: dict[str, Any]) -> None:
@@ -296,32 +277,8 @@ def _dotenv_path(settings: InventorySettings) -> Path:
 def _write_dotenv_secret(name: str, value: str, settings: InventorySettings) -> None:
 	"""Compatibility writer for Hermes' normal environment file."""
 	path = _dotenv_path(settings)
-	lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-	prefix = f"{name}="
-	updated = False
-	output = []
-	for line in lines:
-		if line.startswith(prefix):
-			output.append(prefix + value)
-			updated = True
-		else:
-			output.append(line)
-	if not updated:
-		output.append(prefix + value)
 	path.parent.mkdir(parents=True, exist_ok=True)
-	fd, temporary_name = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=path.parent)
-	try:
-		with os.fdopen(fd, "w", encoding="utf-8") as handle:
-			handle.write("\n".join(output) + "\n")
-			handle.flush()
-			os.fsync(handle.fileno())
-		os.replace(temporary_name, path)
-	except Exception:
-		try:
-			os.unlink(temporary_name)
-		except OSError:
-			pass
-		raise
+	set_key(path, name, value, quote_mode="auto")
 
 
 def write_homebox_api_key(value: str, settings: InventorySettings | None = None) -> None:
@@ -331,15 +288,14 @@ def write_homebox_api_key(value: str, settings: InventorySettings | None = None)
 	try:
 		from hermes_cli.config import save_env_value
 		save_env_value("HOMEBOX_API_KEY", value)
-		return
 	except (ImportError, AttributeError, TypeError):
 		try:
 			from hermes_constants import set_environment_value
 			set_environment_value("HOMEBOX_API_KEY", value)
-			return
 		except (ImportError, AttributeError, TypeError):
 			_write_dotenv_secret("HOMEBOX_API_KEY", value, settings)
-			os.environ["HOMEBOX_API_KEY"] = value
+	if "HOMEBOX_API_KEY" in os.environ:
+		os.environ["HOMEBOX_API_KEY"] = value
 
 
 def storage_health(path: Path) -> tuple[bool, str]:
@@ -375,11 +331,6 @@ HERMES_HOME = _DEFAULTS.hermes_home
 INVENTORY_BASE_DIR = _DEFAULTS.persistent_data_dir
 DASHBOARD_IMAGES_DIR = _DEFAULTS.hermes_images_dir
 HERMES_IMAGES_DIR = DASHBOARD_IMAGES_DIR
-PENDING_UPLOAD_STATE_PATH = _DEFAULTS.pending_upload_state_path
-UPLOAD_WATCH_INTERVAL_SECONDS = _DEFAULTS.watch_interval_seconds
-UPLOAD_BATCH_WINDOW_SECONDS = _DEFAULTS.batch_window_seconds
-PENDING_UPLOAD_TTL_SECONDS = _DEFAULTS.pending_ttl_seconds
-UPLOAD_STATE_RETENTION_SECONDS = _DEFAULTS.state_retention_seconds
 BASE_DIR = INVENTORY_BASE_DIR
 ORIGINALS_DIR = INVENTORY_BASE_DIR / "originals"
 ITEMS_DIR = INVENTORY_BASE_DIR / "items"
@@ -387,7 +338,13 @@ METADATA_DIR = INVENTORY_BASE_DIR / "metadata"
 RECEIPTS_DIR = INVENTORY_BASE_DIR / "receipts"
 INBOX_DIR = INVENTORY_BASE_DIR / "inbox"
 STAGING_DIR = _DEFAULTS.runtime_dir / "tool-staging"
-HOMEBOX_URL = os.environ.get("HOMEBOX_URL", "").rstrip("/")
-HOMEBOX_API_KEY = os.environ.get("HOMEBOX_API_KEY", "")
 HOMEBOX_TIMEOUT_SECONDS = 30
 HOMEBOX_ATTACHMENT_TIMEOUT_SECONDS = 120
+
+
+def __getattr__(name: str):
+	if name == "HOMEBOX_URL":
+		return homebox_url()
+	if name == "HOMEBOX_API_KEY":
+		return homebox_api_key()
+	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

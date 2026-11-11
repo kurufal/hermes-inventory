@@ -6,6 +6,16 @@ from unittest.mock import patch
 from inventory.homebox import complete_entity
 
 
+class AuthenticationTests(unittest.TestCase):
+	def test_validation_uses_get_and_bearer_authentication(self):
+		from inventory.homebox import get_entity_types
+		with patch("inventory.homebox.homebox_url", return_value="http://homebox:3100"), patch("inventory.homebox.homebox_api_key", return_value="hb_test-only"), patch("inventory.homebox.requests.get") as request:
+			request.return_value.json.return_value = []
+			self.assertEqual(get_entity_types(), [])
+		request.assert_called_once_with("http://homebox:3100/api/v1/entity-types", headers={"Authorization": "Bearer hb_test-only"}, timeout=30)
+		request.return_value.raise_for_status.assert_called_once_with()
+
+
 class AttachmentSyncTests(unittest.TestCase):
 	def test_retry_skips_recorded_hash_and_uploads_only_missing_file(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:

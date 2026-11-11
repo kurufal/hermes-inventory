@@ -42,12 +42,13 @@ class InventoryUpdateTests(unittest.TestCase):
 
 	def test_edit_by_asset_id_preserves_ids_images_and_marks_manual_override(self):
 		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as homebox:
-			result = update_item("000-011", "edit", {"purchase_price": 14.99, "purchase_from": "Half Price Books - Tacoma, WA", "attributes": [{"name": "Format", "value": "Hardcover"}]}, settings=self.settings)
+			result = update_item("000-011", "edit", {"purchase_price": 14.99, "purchase_from": "Example Bookstore", "attributes": [{"name": "Format", "value": "Hardcover"}]}, settings=self.settings)
 		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
 		self.assertEqual(result["status"], "updated")
 		self.assertEqual(manifest["asset_id"], "000-011")
 		self.assertEqual(manifest["inventory_id"], self.item_id)
 		self.assertEqual(manifest["purchase_price"], 14.99)
+		self.assertEqual(manifest["purchase_from"], "Example Bookstore")
 		self.assertEqual(manifest["attributes"][0]["value"], "Hardcover")
 		self.assertEqual(manifest["field_sources"]["attributes.format"], "user")
 		self.assertEqual(len(manifest["images"]), 2)

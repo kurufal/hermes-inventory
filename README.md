@@ -1,233 +1,174 @@
 # Hermes Inventory
 
-Hermes Inventory catalogs photographs of physical items in HomeBox. It keeps durable original images, vision metadata, manifests, receipts, and backups separately from Hermes operational media.
+Catalog physical items from photos, search local records, and sync with HomeBox. Original images and recovery metadata stay in durable Inventory storage, separate from Hermes' media caches.
 
-## Documentation
+## 1. Install
 
-This is the v0.5.0 documentation pass. See the [flow guide](docs/flows.md) for setup, command, tool, and reconciliation diagrams. See the [POAM](docs/POAM.md) for planned work and milestones; it distinguishes future items from current functionality.
+Choose your deployment. Commands below are terminal commands unless marked **Hermes chat**. All paths and container names are examples; substitute your deployment's values.
 
-## Quick Start: Windows Hermes Desktop
+<details>
+<summary><strong>1.1 Windows Hermes Desktop</strong></summary>
 
-### Step 1: Open the Agent plugin folder
+**1.1.1 Find the plugin folder (Desktop UI).** Open **Settings > Plugins > Agent plugins > Open plugins folder**. The usual location is `%LOCALAPPDATA%\hermes\plugins`; use the folder Hermes opens for your profile.
 
-In Hermes Desktop, open **Settings** > **Plugins** > **Agent plugins** > **Open plugins folder**. The usual path is `%LOCALAPPDATA%\hermes\plugins`, but use the folder Hermes opens because profiles may differ.
-
-### Step 2: Install the plugin
+**1.1.2 Install (Windows host, PowerShell).** Change to that folder, then clone:
 
 ```powershell
 cd "$env:LOCALAPPDATA\hermes\plugins"
 git clone https://github.com/kurufal/hermes-inventory.git
 ```
 
-The checkout contains `plugin.yaml`, `__init__.py`, `inventory\`, and `skills\`.
+**1.1.3 Enable (Desktop UI).** Restart Desktop, enable `hermes-inventory` under **Agent plugins**, restart again, and start a new chat. Continue to Step 2. No container shell is involved.
 
-### Step 3: Restart and enable
+</details>
 
-Fully close and reopen Hermes Desktop. Open **Settings** > **Plugins** > **Agent plugins** and enable `hermes-inventory`. Fully restart Hermes Desktop again after enabling it, then start a new chat. Plugin registrations apply to new sessions.
+<details>
+<summary><strong>1.2 Docker / Container Hermes Agent</strong></summary>
 
-### Step 4: Setup
+**1.2.1 Identify the Hermes home mount (Docker host).** Check your Compose file or container manager for the existing home volume and `HERMES_HOME`. This example assumes a bind mount `/srv/hermes:/opt/hermes` with `HERMES_HOME=/opt/hermes` inside the container. Keep your existing mount; do not change it just to match this example.
 
-```text
-/inventory setup
-/inventory setup storage \\192.168.1.160\hermes-data
-/inventory setup homebox http://192.168.1.160:3100
-/inventory setup secrets
-```
+| Purpose | Docker host path | Container path |
+| --- | --- | --- |
+| Hermes home | `/srv/hermes` | `/opt/hermes` |
+| Plugin checkout | `/srv/hermes/plugins/hermes-inventory` | `/opt/hermes/plugins/hermes-inventory` |
+| Credentials | `/srv/hermes/.env` | `/opt/hermes/.env` |
+| Hermes attachments | `/srv/hermes/images` | `/opt/hermes/images` |
 
-Storage defaults to `%LOCALAPPDATA%\hermes\inventory` (more precisely, `$HERMES_HOME\inventory`) and needs no acceptance step, but setup marks it as a local-default warning so a NAS choice is visible. A parent such as `\\192.168.1.160\hermes-data` resolves to `\\192.168.1.160\hermes-data\inventory`; a path already ending in `inventory` is used as the exact root. The storage command checks access before saving and never moves existing Inventory data. When the API key is missing, `/inventory setup secrets` explains the secure terminal command:
-
-```powershell
-hermes inventory setup --secrets
-```
-
-The key is hidden while entered and is stored in Hermes' normal `%LOCALAPPDATA%\hermes\.env`. Do not paste it in chat.
-
-### Step 5: Test and use
-
-```text
-/inventory setup test
-```
-
-`/inventory doctor` runs the same checks. Then attach one or more photos and say: `Add this to my inventory.`
-
-## Quick Start: Docker/Container Hermes Agent
-
-The plugin sees paths inside the container only. For a host data root mounted at `/opt/data`:
-
-```text
-HOST PATH:      /mnt/Data16/media/hermes-data
-CONTAINER PATH: /opt/data
-PLUGIN PATH:    /opt/data/plugins/hermes-inventory
-UPLOAD PATH:    /opt/data/images
-```
-
-Clone into the host-mounted plugin directory, then restart or redeploy the container:
+**1.2.2 Install (Docker host, not inside the container).** For the bind mount above:
 
 ```sh
-cd /mnt/Data16/media/hermes-data/plugins
+mkdir -p /srv/hermes/plugins
+cd /srv/hermes/plugins
 git clone https://github.com/kurufal/hermes-inventory.git
 ```
 
-The container sees that checkout at `/opt/data/plugins/hermes-inventory`. This is the supported Git-folder approach; no verified Hermes container plugin-installer command is available in this development environment, so one is not documented here.
+The container sees the same checkout through the mount. No `docker exec` is needed for this route. Ensure the container's Hermes user can read the checkout and write to its home and Inventory directories.
 
-For separately mounted durable inventory storage:
+**1.2.3 Alternative: install inside the container.** Only use this route if the home is a persistent named volume or you cannot access its files from the host. Open its console in your container manager, or run this on the **Docker host**, replacing `your-hermes-container`:
+
+```sh
+docker exec -it your-hermes-container sh
+```
+
+Then run **inside the container**, as the Hermes user, with Git installed:
+
+```sh
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/plugins"
+cd "${HERMES_HOME:-$HOME/.hermes}/plugins"
+git clone https://github.com/kurufal/hermes-inventory.git
+exit
+```
+
+Do not install into a container's disposable filesystem; the Hermes home must persist across recreation.
+
+**1.2.4 Restart and enable (Docker host/container manager).** Restart or redeploy Hermes, enable the plugin if your Hermes version requires it, and start a new session. Continue to Step 2.
+
+</details>
+
+## 2. Configure
+
+<details>
+<summary><strong>2.1 HomeBox URL and API key</strong></summary>
+
+**2.1.1 Generate the key (HomeBox UI).** Generate the key in HomeBox, not Hermes. Hermes' `API_SERVER_KEY` is unrelated.
+
+**2.1.2 Edit Hermes' existing environment file.** Choose the location for your deployment:
+
+- **Windows host:** edit the active Desktop profile's `.env`, commonly `%LOCALAPPDATA%\hermes\.env`.
+- **Docker bind mount:** edit `/srv/hermes/.env` on the host; the example container sees it at `/opt/hermes/.env`. No container shell is needed.
+- **Docker named volume:** edit `.env` in the persistent Hermes home using your volume manager or a container shell. Use the container's path, not `/srv/hermes`.
+
+The general location is `$HERMES_HOME/.env` (default: `~/.hermes/.env`). Add:
+
+```dotenv
+HOMEBOX_URL=http://your-homebox-host:3100
+HOMEBOX_API_KEY=your_homebox_generated_key
+```
+
+For Docker, use a HomeBox address reachable **from the Hermes container**. `localhost` refers to that container, not the Docker host or another container. A Compose service name works when both services share a network.
+
+Keys are never accepted as slash-command arguments: never paste them in chat or store them in `inventory-config.json`. Existing keys are detected automatically. The optional `hermes inventory setup --secrets` terminal command uses hidden input and saves to the same `.env`; run it on the Windows host for Desktop, or inside the Hermes container for Docker.
+
+**2.1.3 Apply changes.** Process environment values take precedence over Hermes `.env`; `homebox.url` in `inventory-config.json` is the URL fallback. A Compose project `.env` is not automatically passed into the container: use `environment`/`env_file` if choosing that route. Restart Hermes after changing an already-exported value; recreate/redeploy the container when changing its environment configuration.
+
+</details>
+
+<details>
+<summary><strong>2.2 Optional durable storage</strong></summary>
+
+**2.2.1 Keep the default or choose a mounted location.** Durable data defaults to `$HERMES_HOME/inventory`; runtime state uses `$HERMES_HOME/inventory-runtime`. No storage command is required for the default.
+
+For separate Docker storage, add a writable bind mount such as `/srv/inventory:/inventory-data` in your **host-side container configuration**, set `INVENTORY_BASE_DIR=/inventory-data` in the **container environment**, and redeploy. Inventory uses the container path, never `/srv/inventory`.
+
+**2.2.2 Set a Desktop/NAS override (Hermes chat), if needed:**
 
 ```text
-HOST PATH:      /mnt/Data16/inventory/hermes-inventory
-CONTAINER PATH: /inventory-data
+/inventory setup storage \\server\share\HermesInventory
+/inventory setup storage default
 ```
 
-Set `INVENTORY_BASE_DIR=/inventory-data` in the container environment. Do not set it to the host path. Existing configurations using `HERMES_HOME=/opt/data`, `INVENTORY_BASE_DIR=/opt/data/inventory`, `HOMEBOX_URL`, and `HOMEBOX_API_KEY` continue to work.
+A parent path gets an `inventory` child; a path ending in `inventory` is used directly. Setup tests access but never moves existing data. On Windows, prefer UNC paths over mapped drives. On Linux/Docker, mount NAS storage first; the container must see the mount. Inventory does not manage SMB credentials.
 
-For Docker, normally provide `HOMEBOX_API_KEY` through the container `.env` or environment configuration. The local CLI wizard is unnecessary when that environment is already configured.
+`INVENTORY_BASE_DIR`, `INVENTORY_RUNTIME_DIR`, and `INVENTORY_BACKUP_DIR` override storage paths; otherwise `$HERMES_HOME/inventory-config.json` and defaults apply.
 
-## Guided Setup
+</details>
 
-`/inventory setup` reports the resolved persistent storage, HomeBox URL/key/authentication, Hermes upload inbox, and Inventory runtime directory. Commands are case-insensitive; values are preserved exactly.
+## 3. Verify and Use
 
-- `/inventory setup storage <absolute-path>` sets a tested override.
-- `/inventory setup storage default` restores `$HERMES_HOME/inventory`.
-- `/inventory setup homebox <url>` stores the non-secret URL in `inventory-config.json`.
-- `/inventory setup secrets` reports only secret status and the local secure workflow.
-- `/inventory setup test` verifies storage, upload/runtime paths, and a non-destructive authenticated HomeBox request.
+<details>
+<summary><strong>3.1 Check setup and add your first item</strong></summary>
 
-Environment values have priority over plugin configuration. A non-empty `HOMEBOX_URL` is therefore Docker-compatible.
+**3.1.1 Verify (Hermes chat).** Run `/inventory setup` for status, then `/inventory setup test` or `/inventory doctor` to check storage and make a non-destructive Bearer-authenticated HomeBox request. These are chat commands, not host or container shell commands.
 
-## Secrets
+**3.1.2 Add an item (Hermes chat).** Attach photos of one physical item and say **Add this to my inventory** in the same message. That is the entire add workflow: no watcher, upload queue, or separate import step. Inventory performs its own vision analysis. Attachments alone and generic conversation do not trigger it.
 
-API keys are never accepted as slash-command arguments and never appear in output. On Windows, use `hermes inventory setup --secrets`; on Docker, use the container environment configuration. Keys are never written to `inventory-config.json`, `item.json`, `catalog.json`, receipts, backups, TOON, or logs.
+**3.1.3 Search or update (Hermes chat).** Try "What's item 000-011?", "Tag 000-011 as Cyberpunk", or "Resync 000-011." Use the prior result's Asset ID (`000-011`) or immutable Inventory ID to identify an item. Local search is read-only; user edits survive reanalysis.
 
-## Using Inventory
+</details>
 
-Automatic detection watches only `$HERMES_HOME/images` and only Hermes-managed `dashboard_*`, `upload_*`, and `clip_*` image filenames. It supports existing Dashboard filenames such as `dashboard_20260815_190339_<id>_signal-photo.jpg` and Desktop upload/clip names.
+## Photos and Inventory Behavior
 
-Hermes exposes three Inventory tools: `inventory_ingest` to add or catalog a
-physical item, `inventory_search` to read existing canonical Inventory data,
-and `inventory_update` to edit, reanalyze, or resync an existing item. They
-apply only when the user clearly asks to operate on Inventory or HomeBox data;
-greetings, tests, connection/model checks, plugin development questions, and
-attachments without an Inventory request do not trigger them.
+Inventory uses only the images attached to the current request, through paths supplied by Hermes; users do not need to type filesystem paths. No background watcher or pending-upload queue is used. Inventory does not scan `$HERMES_HOME/images`, media caches, or Desktop attachment folders, and it never guesses the newest image.
 
-`$HERMES_HOME/media`, `$HERMES_HOME/image_cache`, and `$HERMES_HOME/user_media` are never automatically scanned. Desktop composer images at `%APPDATA%\Hermes\composer-images` are also never watched, but an existing path Hermes explicitly supplies in `image_paths` is trusted on a local Desktop backend. The internal Python `ingest(source_directory, ...)` API can use an explicitly supplied source directory for development/testing. The chat tool otherwise accepts only `$HERMES_HOME/images` and trusted current Desktop composer paths, never arbitrary filesystem paths. A composer path unavailable to a remote Linux/Docker backend is rejected rather than guessed.
+Explicit attachments in `$HERMES_HOME/images` and local Desktop attachments under `%APPDATA%\Hermes\composer-images` remain supported regardless of filename. A remote backend cannot read client-local Windows paths. If Hermes does not provide accessible attachment paths, Inventory reports the attachment problem instead of ingesting an unrelated image. Old `pending-uploads.json` files are no longer used for ingestion and can be removed; the plugin does not create new ones.
 
-## Updating the Plugin
+The three tools are `inventory_ingest`, `inventory_search`, and `inventory_update`. HomeBox owns tag vocabulary and primary-photo selection; Inventory does not create tags or reorder attachments. Exact duplicate images do not create another item.
 
-Windows Desktop:
+## Commands and Recovery
 
-```powershell
-cd "$env:LOCALAPPDATA\hermes\plugins\hermes-inventory"
-git pull
-```
+| Command | Purpose |
+| --- | --- |
+| `/inventory setup` | Configuration status and optional storage/URL overrides |
+| `/inventory doctor` | Storage and HomeBox connection checks |
+| `/inventory status` | Paths, configuration, and local-state warnings |
+| `/inventory uploads` | Request-only attachment behavior and trusted attachment directory |
+| `/inventory homebox test` | HomeBox connection check |
+| `/inventory refresh` | Read-only reconciliation preview; add `--verbose` for details |
+| `/inventory refresh --resolve` | Apply deterministic local repairs after a verified backup |
+| `/inventory backup` | Create an Inventory backup |
+| `/inventory recover` | Scan recovery state; add `plan` for a recovery plan |
 
-Fully close Hermes Desktop, reopen it, and verify `hermes-inventory` remains enabled. If it must be enabled again, restart Hermes Desktop a second time. Start a new chat/session.
+`/inventory refresh --dry-run` is also read-only. For an ambiguous match, inspect `--verbose`, preview with `/inventory refresh --resolve --dry-run <ambiguity-number> <inventory-id>`, then remove `--dry-run` to apply your choice. Resolution revalidates evidence, never guesses a match, and does not modify existing HomeBox items or delete legacy evidence.
 
-For Docker management UIs, determine the host-mounted Hermes data directory, update `<host Hermes data>/plugins/hermes-inventory` with Git, restart/redeploy the Hermes container, then start a new Hermes session. No verified dashboard plugin update control is available, so this document does not claim one exists.
-
-## Network/NAS Storage
-
-On Windows prefer UNC storage such as `\\server\share\HermesInventory` rather than a mapped drive. Windows manages SMB credentials; the plugin neither mounts shares nor stores SMB credentials. On Linux/Docker, mount the share on the host and configure the container mount path.
-
-## Media and Path Layout
-
-Hermes operational media is owned by Hermes:
-
-```text
-$HERMES_HOME/
-├── images/       automatic Inventory inbox only
-├── image_cache/  never scanned
-├── media/        never scanned
-├── user_media/   never scanned
-└── plugins/
-```
-
-Inventory owns `$HERMES_HOME/inventory-runtime` for local pending state/staging and `<configured persistent root>/` for `items/`, `observations/`, `receipts/`, `catalog.json`, and `backups/`. Canonical Inventory items are never placed in Hermes media paths by default; recovery uses Inventory-owned originals rather than Hermes caches.
-
-## Commands
-
-`/inventory setup`, `/inventory status`, `/inventory doctor`, `/inventory refresh`, `/inventory storage`, `/inventory uploads`, `/inventory homebox`, `/inventory backup`, and `/inventory recover` are available before HomeBox setup. `inventory_ingest` returns `not_configured` and directs to `/inventory setup` until HomeBox URL and API key exist.
-
-`/inventory refresh` is a read-only reconciliation preview; `--dry-run` is an equivalent explicit preview alias. Add `--verbose` to show canonical, HomeBox-only, local-only, conflict, deterministic-plan, and ambiguous legacy-candidate detail. Refresh compares canonical local Inventory manifests, legacy or historical evidence, Asset ID reservations, incomplete transactions, and configured HomeBox records.
-
-`/inventory refresh --resolve` safely applies only deterministic local reconciliation actions. Before changing canonical data it creates and verifies an Inventory-owned local backup, then rechecks the plan. It can adopt a HomeBox-only record, migrate the verified historical `metadata/<Inventory ID>.json` plus `originals/<Inventory ID>/` layout, repair a missing local HomeBox link, normalize old system-owned `Type: ` tags, remove only provably stale tokenized orphan Asset ID reservations, and rebuild the local catalog. Tokenless legacy reservations, malformed reservations, incomplete transactions, and historical duplicate image evidence are reported but never automatically deleted. It never deletes historical evidence, guesses fuzzy identity matches, or modifies an existing HomeBox item during adoption. Conflicts and ambiguous records are skipped.
-
-For an ambiguity, inspect `/inventory refresh --verbose`, preview a chosen legacy record with `/inventory refresh --resolve --dry-run <ambiguity-number> <inventory-id>`, then apply it with `/inventory refresh --resolve <ambiguity-number> <inventory-id>`. The chosen ID must be one of the displayed candidates and is revalidated against its metadata, original-image hashes, and HomeBox identity immediately before mutation. Explicit resolution writes only a new canonical local record; it never changes HomeBox or deletes legacy evidence.
-
-HomeBox adoption stores the existing HomeBox metadata locally but does not download attachments as immutable originals. Adopted schema-v3 records can therefore have no local images or vision result; local search remains canonical/local. Existing schema-v1 and schema-v2 photographed records remain readable.
-
-## Updating Items
-
-Use `inventory_update` for factual corrections, durable-image reanalysis, and HomeBox resyncs. Target the item from the prior result with its Asset ID (for example, `000-011`) or immutable Inventory ID (for example, `INV-20260901-204535-601208be`). The Asset ID is the readable label; the Inventory ID remains the recovery identity.
-
-```text
-inventory_update target=000-011 operation=edit changes={"attributes":[{"name":"Format","value":"Hardcover"}],"purchase_from":"Half Price Books - Tacoma, WA","purchase_price":14.99}
-inventory_update target=000-011 operation=reanalyze
-inventory_update target=000-011 operation=resync
-```
-
-Edits are marked user-owned and survive later reanalysis. Supported corrections include names, descriptions, type/category, manufacturer, condition, identifiers, attributes, purchase details, locations, notes, and tags. Examples: `This is hardcover, not paperback.`, `Tag 000-011 as Cyberpunk.`, `Update the description of 000-011.`, `Redo the Cyberpunk book.`, and `Resync 000-011.`
-
-**Asset ID vs Inventory ID:** `000-011` is the human-friendly Asset ID used in conversation and HomeBox. `INV-20260901-204535-601208be` is the immutable Inventory ID used for durable storage and recovery.
-
-Inventory normalizes types to Book, Board Game, Video Game, Figure / Statue, Collectible, Electronics, Computer Hardware, Tool, Appliance, Media, Toy, or Other. Category is the canonical item type; explicit local tags such as `Cyberpunk` are user tags. Existing unrelated HomeBox tags are preserved.
-
-HomeBox owns the tag vocabulary. Inventory matches category and explicit user tags separately against existing HomeBox tags by name and never creates HomeBox tags automatically. The canonical category is matched directly, so local `Book` classification uses a HomeBox `Book` tag when it exists.
-
-## Search
-
-Use `inventory_search` to query the local canonical Inventory without changing it:
-
-```text
-Check my inventory for The Martian.
-Do I have Cyberpunk 2077?
-What's item 000-011?
-Show me my board games.
-```
-
-Search matches Asset ID, Inventory ID, names, descriptions, categories, identifiers, attributes, tags, and locations. A single match includes its stored details; multiple matches are returned as a list without guessing the intended item.
-
-Canonical originals use names such as `000-011_cyberpunk-2077-no-coincidence_front-cover.jpg` and `000-011_cyberpunk-2077-no-coincidence_copyright-isbn-page.jpg`. Manifests retain original filenames and hashes, which remain stronger recovery signals than filenames. Primary/display image selection is managed through the HomeBox UI. Inventory never reorders or changes HomeBox primary attachments.
-
-Exact SHA-256 image preflight runs before vision. All-exact incoming evidence can stop before vision; identical bytes are intentionally not stored again as another canonical image. Mixed old/new evidence is not automatically merged into an existing item. Perceptually similar but byte-different or re-encoded images are not automatic duplicates. Attachment retries use SHA-256-keyed `attachment_sync` state, so a pending resync skips already uploaded bytes and uploads only missing images. The installed HomeBox integration has no verified attachment-metadata rename contract, so attachment display names are not renamed automatically; local canonical filenames remain authoritative.
-
-## Backup and Recovery
-
-Items are persisted before HomeBox mutation with original images, `vision.json`, and canonical `item.json`. A failed sync remains `pending_homebox_sync`. Refresh reports historical duplicate canonical image hashes. Backups exclude runtime state and secrets; recovery is non-destructive. Item schema remains version 3 and the plugin release is 0.5.0.
-
-## Advanced Configuration
-
-Paths resolve as environment variable, then `$HERMES_HOME/inventory-config.json`, then defaults. `INVENTORY_RUNTIME_DIR`, `INVENTORY_BASE_DIR`, and `INVENTORY_BACKUP_DIR` override their respective locations. `HOMEBOX_URL` environment configuration overrides plugin JSON.
+Items and originals are saved before HomeBox mutation. Failed syncs remain `pending_homebox_sync`. Backups exclude secrets and runtime state. HomeBox-only adoption keeps existing metadata locally but does not download original photos. Existing item schema versions 1-3 remain readable.
 
 ## Development and Testing
 
-The direct Python ingestion API accepts explicitly supplied local source directories for development/testing. Run:
+Run from a development checkout in a terminal, not Hermes chat:
 
 ```powershell
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -q
 python -m compileall -q .
 ```
 
-## Troubleshooting
+## Updates and Troubleshooting
 
-### Tool Search bridge error
+Run `git pull` in the same checkout used for installation: on the Windows host for Desktop, on the Docker host for a bind mount, or inside the container for the named-volume route. Restart Desktop or redeploy the container, confirm the plugin is enabled, and start a new session.
 
-If Hermes discovers and describes `inventory_ingest`, then reports `tool_call requires a 'name' argument`, the failure may be the Hermes deferred Tool Search bridge rather than Inventory registration or HomeBox. Do not manually call HomeBox as a substitute: Inventory owns durable photos, duplicate checks, recovery metadata, and linkage. An optional Hermes configuration workaround is:
+- **HTTP 401/403:** check the HomeBox-generated `HOMEBOX_API_KEY` in Hermes' `.env`, then run `/inventory setup test`. Network and invalid-URL failures are reported separately.
+- **WinError 67:** the SMB share must already exist; Inventory can create a child directory, not the share itself.
+- **Desktop attachment unavailable:** use a local backend or upload to the remote backend. Client-local paths are not portable.
+- **`tool_call requires a 'name' argument`:** this may be Hermes' Tool Search bridge. Do not bypass Inventory with raw HomeBox calls. An optional Hermes setting is `tools.tool_search.enabled: off`; restart and start a new session. This increases tool-schema context usage.
 
-```yaml
-tools:
-	tool_search:
-		enabled: off
-```
-
-This keeps plugin/MCP schemas eager and can increase tool-schema context usage. The plugin does not edit this setting; restart Hermes and start a new session after changing it. No verified Desktop UI location for this setting is available.
-
-### Desktop attachment rejected
-
-Current versions accept explicit existing local paths below `%APPDATA%\Hermes\composer-images`. A remote backend cannot read a Windows Desktop-client path; use a local backend or a valid recent backend upload batch.
-
-### HomeBox 401
-
-The server was reached but rejected the credential. Current HomeBox static keys normally start with `hb_`. Run `hermes inventory setup --secrets` and enter a current key; the key is hidden and never echoed.
-
-### Storage unavailable: WinError 67
-
-The SMB share itself must already exist. Inventory may create its `inventory` child beneath an existing share, but it cannot create a missing SMB share.
+See [workflow diagrams](docs/flows.md) for a visual overview and [planned work](docs/POAM.md) for future milestones, not current features.

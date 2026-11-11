@@ -2,15 +2,13 @@
 
 import importlib.util
 import argparse
+import json
 import tempfile
 import unittest
 import yaml
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-from inventory.uploads import PendingUploadBatch, PendingUploadError
-
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,28 +35,17 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		(self.root / "images").mkdir()
 		self.explicit = self.root / "images" / "explicit.png"
 		self.explicit.write_bytes(b"explicit")
-		self.pending = self.root / "images" / "dashboard_20260816_084100_item.png"
-		self.pending.write_bytes(b"pending")
-		self.batch = PendingUploadBatch(
-			batch_id="batch-1",
-			image_paths=(self.pending.resolve(),),
-			created_at="2026-08-16T08:41:00Z",
-			updated_at="2026-08-16T08:41:00Z",
-			expires_at="2026-08-16T08:46:00Z",
-		)
+		self.unrelated = self.root / "images" / "dashboard_20260816_084100_item.png"
+		self.unrelated.write_bytes(b"unrelated")
 
 	def tearDown(self):
 		self.temporary_directory.cleanup()
 
-	def run_ingest(self, image_paths, *, use_pending=False, backend_result=None):
+	def run_ingest(self, image_paths, *, backend_result=None):
 		seen = {}
 		settings = SimpleNamespace(
 			hermes_images_dir=self.root / "images",
 			runtime_dir=self.root / "runtime",
-			pending_upload_state_path=self.root / "runtime" / "pending.json",
-			pending_ttl_seconds=300,
-			state_retention_seconds=86400,
-			batch_window_seconds=10,
 		)
 
 		def fake_ingest(stage_directory, vision_client, **kwargs):
@@ -78,30 +65,21 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			self.plugin,
 			"_load_inventory_ingest",
 			return_value=fake_ingest,
-		), patch.object(
-			self.plugin,
-			"mark_pending_upload_consumed",
-		) as mark_consumed, patch.object(
-			self.plugin,
-			"mark_pending_upload_processing",
-		), patch.object(
-			self.plugin,
-			"release_pending_upload_claim",
 		):
 			result = self.plugin.inventory_ingest(
 				image_paths,
 				"fake-llm",
-				use_pending_upload=use_pending,
 			)
 
-		return result, seen, mark_consumed
+		return result, seen
 
 	def test_explicit_paths_still_use_existing_pipeline(self):
-		result, seen, mark_consumed = self.run_ingest([str(self.explicit)])
+		result, seen = self.run_ingest([str(self.explicit)])
 
 		self.assertIn('"created": true', result)
 		self.assertEqual(seen["staged_names"], ["explicit.png"])
-		mark_consumed.assert_not_called()
+		self.assertFalse(list(self.root.rglob("pending-uploads.json")))
+		self.assertTrue(self.unrelated.exists())
 
 	def test_windows_composer_images_are_trusted_only_when_explicit(self):
 		composer = self.root / "Roaming" / "Hermes" / "composer-images"
@@ -111,7 +89,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		first.write_bytes(b"first")
 		second.write_bytes(b"second")
 		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False), patch("inventory.config.sys.platform", "win32"):
-			result, seen, _ = self.run_ingest([str(first), str(second)])
+			result, seen = self.run_ingest([str(first), str(second)])
 		self.assertIn('"created": true', result)
 		self.assertEqual(set(seen["staged_names"]), {first.name, second.name})
 
@@ -120,7 +98,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		outside.parent.mkdir(parents=True)
 		outside.write_bytes(b"image")
 		with patch.dict("os.environ", {"APPDATA": str(self.root / "Roaming")}, clear=False):
-			result, _, _ = self.run_ingest([str(outside)])
+			result, _ = self.run_ingest([str(outside)])
 		self.assertIn("outside trusted Hermes attachment roots", result)
 
 	def test_unavailable_composer_path_explains_remote_backend_limit(self):
@@ -128,23 +106,27 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		with patch.object(self.plugin, "get_settings", return_value=settings), patch.object(
 			self.plugin, "homebox_url", return_value="http://homebox",
 		), patch.object(self.plugin, "homebox_api_key", return_value="configured-key"):
-			result = self.plugin.inventory_ingest(r"C:\Users\Desktop\AppData\Roaming\Hermes\composer-images\composer_missing.jpg", "fake-llm")
+			result = self.plugin.inventory_ingest(r"C:\Users\ExampleUser\AppData\Roaming\Hermes\composer-images\composer_missing.jpg", "fake-llm")
 		self.assertIn("unavailable to this backend", result)
 
-	def test_explicit_paths_take_priority_over_pending_mode(self):
-		with patch.object(
-			self.plugin,
-			"resolve_pending_upload_batch",
-			side_effect=AssertionError("pending resolver should not be called"),
-		):
-			result, _, _ = self.run_ingest([str(self.explicit)], use_pending=True)
+	def test_empty_input_does_not_scan_or_ingest_unrelated_uploads(self):
+		with patch.object(self.plugin, "_stage_images") as stage, patch("pathlib.Path.iterdir", side_effect=AssertionError("must not scan attachments")):
+			result, seen = self.run_ingest([])
+		stage.assert_not_called()
+		self.assertEqual(seen, {})
+		self.assertIn("No accessible image attachments", result)
+		self.assertIn('"error_stage": "attachment_resolution"', result)
+		self.assertFalse((self.root / "runtime").exists())
 
-		self.assertIn('"created": true', result)
-
-	def test_empty_input_without_pending_mode_returns_clear_error(self):
-		result, _, _ = self.run_ingest([])
-
-		self.assertIn("image_paths or set use_pending_upload", result)
+	def test_legacy_pending_state_is_not_used_or_modified(self):
+		state = self.root / "runtime" / "pending-uploads.json"
+		state.parent.mkdir()
+		contents = json.dumps({"version": 1, "batches": [{"status": "pending", "images": [{"path": str(self.unrelated)}]}]})
+		state.write_text(contents, encoding="utf-8")
+		result, seen = self.run_ingest([])
+		self.assertIn('"error_stage": "attachment_resolution"', result)
+		self.assertEqual(seen, {})
+		self.assertEqual(state.read_text(encoding="utf-8"), contents)
 
 	def test_ingest_before_homebox_configuration_returns_not_configured(self):
 		settings = SimpleNamespace(hermes_images_dir=self.root / "images")
@@ -159,80 +141,23 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn('"status": "not_configured"', result)
 		self.assertIn("/inventory setup", result)
 
-	def test_pending_batch_is_consumed_after_staging(self):
-		with patch.object(
-			self.plugin,
-			"resolve_pending_upload_batch",
-			return_value=self.batch,
-		) as resolve_batch:
-			result, seen, mark_consumed = self.run_ingest([], use_pending=True)
-
-		self.assertTrue(resolve_batch.called)
-		self.assertEqual(mark_consumed.call_args.args, ("batch-1",))
-		self.assertIn("state_path", mark_consumed.call_args.kwargs)
-		self.assertEqual(seen["staged_names"], ["dashboard_20260816_084100_item.png"])
-		self.assertIn('"created": true', result)
-
-	def test_exact_duplicate_pending_batch_is_consumed(self):
+	def test_exact_duplicate_attachments_use_no_decision_wrapper(self):
 		duplicate = {
 			"classification": "EXACT_DUPLICATE",
 			"created": False,
 			"durable": True,
 			"duplicate_check": {"candidates": [{"name": "Existing"}]},
 		}
-		with patch.object(
-			self.plugin,
-			"resolve_pending_upload_batch",
-			return_value=self.batch,
-		):
-			result, _, mark_consumed = self.run_ingest(
-				[],
-				use_pending=True,
-				backend_result=duplicate,
-			)
-
-		self.assertEqual(mark_consumed.call_args.args, ("batch-1",))
-		self.assertIn("state_path", mark_consumed.call_args.kwargs)
+		result, _ = self.run_ingest([str(self.explicit)], backend_result=duplicate)
 		self.assertIn("EXACT_DUPLICATE", result)
 		self.assertIn("requires_user_action", result)
 
 	def test_exact_image_duplicate_uses_same_no_decision_wrapper_behavior(self):
 		duplicate = {"classification": "EXACT_IMAGE_DUPLICATE", "created": False, "durable": True, "inventory_id": "INV-existing", "asset_id": "000-001", "name": "Existing"}
-		result, _, _ = self.run_ingest([str(self.explicit)], backend_result=duplicate)
+		result, _ = self.run_ingest([str(self.explicit)], backend_result=duplicate)
 		self.assertIn("EXACT_IMAGE_DUPLICATE", result)
 		self.assertIn('"requires_user_action": false', result)
 		self.assertIn("INV-existing", result)
-
-	def test_no_pending_batch_returns_structured_error(self):
-		with patch.object(
-			self.plugin,
-			"resolve_pending_upload_batch",
-			side_effect=PendingUploadError("No recent pending dashboard upload was found."),
-		):
-			result, _, _ = self.run_ingest([], use_pending=True)
-
-		self.assertIn('"status": "error"', result)
-		self.assertIn("No recent pending dashboard upload", result)
-
-	def test_no_pending_batch_includes_structured_diagnostics(self):
-		error = PendingUploadError("No recent pending dashboard upload was found.")
-		error.debug = {
-			"state_file": "/opt/data/inventory/pending-uploads.json",
-			"pending_batch_count": 0,
-			"total_batch_count": 2,
-			"candidate_count": 0,
-		}
-		with patch.object(
-			self.plugin,
-			"resolve_pending_upload_batch",
-			side_effect=error,
-		):
-			result, _, _ = self.run_ingest([], use_pending=True)
-
-		self.assertIn('"error_stage": "pending_upload_resolution"', result)
-		self.assertIn('"pending_debug"', result)
-		self.assertIn('"candidate_count": 0', result)
-		self.assertIn('"total_batch_count": 2', result)
 
 	def test_vision_parse_failure_surfaces_structured_diagnostics(self):
 		def failing_ingest(stage_directory, vision_client, **kwargs):
@@ -268,7 +193,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		self.assertIn('"input_image_count": 1', result)
 		self.assertIn('"raw_response_preview": "not valid json"', result)
 
-	def test_registered_schema_has_optional_pending_mode(self):
+	def test_registered_schema_requires_attachments_and_starts_no_watcher(self):
 		registrations = {}
 
 		class FakeContext:
@@ -284,15 +209,18 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
+		with patch("threading.Thread.start") as watcher, patch.dict("os.environ", {"HERMES_HOME": str(self.root)}, clear=False):
 			self.plugin.register(FakeContext())
+		watcher.assert_not_called()
+		self.assertFalse((self.root / "inventory-runtime").exists())
+		self.assertFalse(list(self.root.rglob("pending-uploads.json")))
 		schema = registrations["inventory_ingest"]["schema"]
 		properties = schema["parameters"]["properties"]
 
-		self.assertNotIn("required", schema["parameters"])
-		self.assertIn("use_pending_upload", properties)
+		self.assertEqual(schema["parameters"]["required"], ["image_paths"])
+		self.assertNotIn("use_pending_upload", properties)
 		self.assertIn("image_paths", properties)
-		self.assertNotIn("minItems", properties["image_paths"])
+		self.assertEqual(properties["image_paths"]["minItems"], 1)
 		self.assertNotIn("recent_dashboard_upload", properties)
 
 	def test_registers_commands_without_homebox_credentials(self):
@@ -322,8 +250,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 					"description": description,
 				}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
-			self.plugin.register(FakeContext())
+		self.plugin.register(FakeContext())
 		self.assertEqual(registrations["command"]["name"], "inventory")
 		self.assertEqual(registrations["cli"]["name"], "inventory")
 		self.assertNotIn("requires_env", registrations["tools"]["inventory_ingest"])
@@ -335,7 +262,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		cli.assert_called_once_with(["setup", "--secrets"])
 		with patch.object(self.plugin, "inventory_ingest", return_value="handled") as handler:
 			self.assertEqual(registrations["tools"]["inventory_ingest"]["handler"]({"image_paths": ["C:/photo.jpg"]}), "handled")
-		handler.assert_called_once_with(["C:/photo.jpg"], "fake-llm", use_pending_upload=False)
+		handler.assert_called_once_with(["C:/photo.jpg"], "fake-llm")
 
 	def test_registers_all_inventory_tools_by_name(self):
 		registrations = {}
@@ -353,8 +280,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
-			self.plugin.register(FakeContext())
+		self.plugin.register(FakeContext())
 
 		self.assertEqual(
 			set(registrations),
@@ -377,8 +303,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
-			self.plugin.register(FakeContext())
+		self.plugin.register(FakeContext())
 
 		manifest = yaml.safe_load((PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
 		provided_tools = set(manifest["provides_tools"])
@@ -399,8 +324,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			def register_tool(self, **kwargs):
 				return {"registered": True}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
-			self.plugin.register(FakeContext())
+		self.plugin.register(FakeContext())
 		description = registrations["description"].lower()
 		for phrase in ("clear physical-item inventory/homebox requests only", "add", "catalog", "ingest", "find", "read", "search", "edit", "update", "reanalyze", "resync"):
 			self.assertIn(phrase, description)
@@ -421,8 +345,7 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 				registrations[kwargs["name"]] = kwargs
 				return {"registered": True}
 
-		with patch.object(self.plugin, "start_pending_upload_watcher"):
-			self.plugin.register(FakeContext())
+		self.plugin.register(FakeContext())
 
 		description = registrations["inventory_ingest"]["schema"]["description"].lower()
 		self.assertEqual(description, registrations["inventory_ingest"]["description"].lower())
@@ -432,8 +355,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			"connection or model checks",
 			"development or debugging questions",
 			"unrelated requests",
-			"image, attachment, pending upload, or recent upload without an inventory request",
-			"use_pending_upload=true",
+			"image or attachment without an inventory request",
+			"never scan upload directories or guess the newest image",
 			"do not call generic vision analysis first",
 		):
 			self.assertIn(phrase, description)
@@ -462,7 +385,8 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 		):
 			self.assertIn(phrase, skill)
 		self.assertIn("what kind of inventory?", skill)
-		self.assertIn("use_pending_upload", skill)
+		self.assertNotIn("use_pending_upload", skill)
+		self.assertIn("current request", skill)
 		self.assertIn("do not call `vision_analyze` first", skill)
 		for phrase in (
 			"only route to inventory tools when the user expresses clear intent",

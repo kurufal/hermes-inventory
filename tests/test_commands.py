@@ -6,11 +6,71 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 from inventory.cli import handle_inventory_cli
 from inventory.commands import _format_refresh, inventory_cli, inventory_command
 
 
 class InventoryCommandTests(unittest.TestCase):
+	def test_uploads_describes_request_only_mode_without_creating_state(self):
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
+				result = inventory_command("uploads")
+			self.assertEqual(list(Path(temporary_directory).iterdir()), [])
+		self.assertIn("images attached to an explicit add request", result)
+		self.assertIn("No background watcher", result)
+		self.assertNotIn("pending-uploads.json", result)
+
+	def test_setup_commands_detect_dotenv_key_without_interactive_setup(self):
+		for command in ("setup", "doctor", "setup test"):
+			with self.subTest(command=command), tempfile.TemporaryDirectory() as temporary_directory:
+				(Path(temporary_directory) / ".env").write_text("HOMEBOX_URL=http://homebox:3100\nHOMEBOX_API_KEY=hb_test-only\n", encoding="utf-8")
+				with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True), patch("inventory.homebox.get_entity_types", return_value=[]) as check, patch("inventory.refresh.refresh", side_effect=RuntimeError("preview unavailable")), patch("inventory.commands.getpass.getpass") as prompt:
+					result = inventory_command(command)
+				check.assert_called_once_with()
+				prompt.assert_not_called()
+				self.assertIn("[PASS] HomeBox authentication", result)
+				self.assertNotIn("setup --secrets", result)
+				self.assertNotIn("hb_test-only", result)
+				if command == "setup":
+					self.assertIn("Setup complete.", result)
+
+	def test_missing_key_instructions_use_hermes_dotenv(self):
+		for command in ("setup", "doctor", "setup test"):
+			with self.subTest(command=command), tempfile.TemporaryDirectory() as temporary_directory:
+				with patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_URL": "http://homebox"}, clear=True), patch("inventory.homebox.get_entity_types") as check:
+					result = inventory_command(command)
+				check.assert_not_called()
+				self.assertIn("HOMEBOX_API_KEY", result)
+				self.assertIn("$HERMES_HOME/.env", result)
+				self.assertIn("~/.hermes/.env", result)
+
+	def test_authentication_failures_are_distinct_and_redacted(self):
+		secret = "hb_test-sensitive"
+		failures = [(requests.ConnectionError(secret), "Network failure"), (requests.Timeout(secret), "Network failure"), (ValueError(secret), "validation failed")]
+		for status in (401, 403, 500):
+			response = requests.Response()
+			response.status_code = status
+			failures.append((requests.HTTPError(secret, response=response), f"HTTP {status}"))
+		with tempfile.TemporaryDirectory() as temporary_directory:
+			for failure, expected in failures:
+				for command in ("setup", "doctor", "setup test", "cli"):
+					with self.subTest(command=command, expected=expected), patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_URL": "http://homebox", "HOMEBOX_API_KEY": secret}, clear=True), patch("inventory.homebox.get_entity_types", side_effect=failure), patch("inventory.commands.getpass.getpass", return_value=""):
+						result = inventory_cli(["setup", "--secrets"]) if command == "cli" else inventory_command(command)
+					self.assertIn(expected, result)
+					self.assertNotIn(secret, result)
+
+	def test_invalid_urls_are_reported_without_echoing_input(self):
+		for url in ("ftp://host", "http://[invalid", "http://host:invalid", "http://user:hb_sensitive@host", "http://host/ bad"):
+			with self.subTest(url=url), tempfile.TemporaryDirectory() as temporary_directory:
+				with patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_URL": url, "HOMEBOX_API_KEY": "hb_test"}, clear=True), patch("inventory.homebox.get_entity_types") as check:
+					for command in ("setup", "doctor", "setup test"):
+						result = inventory_command(command)
+						self.assertIn("[FAIL] HomeBox URL: invalid", result)
+						self.assertNotIn(url, result)
+				check.assert_not_called()
+
 	def test_status_is_read_only(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=False), patch("inventory.commands.storage_health") as health:
@@ -65,8 +125,8 @@ class InventoryCommandTests(unittest.TestCase):
 	def test_storage_set_preserves_argument_case(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=False), patch("inventory.commands.storage_health", return_value=(True, "reachable")):
-				result = inventory_command(r"storage set \\NAS\Inventory\Anime Figures")
-			self.assertIn(r"\\NAS\Inventory\Anime Figures", result)
+				result = inventory_command(r"storage set \\Server\Share\Example Collection")
+			self.assertIn(r"\\Server\Share\Example Collection", result)
 
 	def test_unknown_command_is_helpful(self):
 		self.assertIn("Unknown Inventory command: NoPe", inventory_command("NoPe"))
@@ -98,10 +158,10 @@ class InventoryCommandTests(unittest.TestCase):
 	def test_setup_normalizes_hermes_rich_link_url(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):
-				result = inventory_command("setup homebox @url:`[http://192.168.1.160:3100](http://192.168.1.160:3100)`")
+				result = inventory_command("setup homebox @url:`[http://192.0.2.10:3100](http://192.0.2.10:3100)`")
 				payload = json.loads((Path(temporary_directory) / "inventory-config.json").read_text(encoding="utf-8"))
-		self.assertIn("http://192.168.1.160:3100", result)
-		self.assertEqual(payload["homebox"]["url"], "http://192.168.1.160:3100")
+		self.assertIn("http://192.0.2.10:3100", result)
+		self.assertEqual(payload["homebox"]["url"], "http://192.0.2.10:3100")
 
 	def test_setup_normalizes_https_trailing_slash(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
@@ -166,10 +226,11 @@ class InventoryCommandTests(unittest.TestCase):
 		self.assertEqual(result, "HomeBox authentication: PASS")
 
 	def test_secure_cli_writes_new_secret_and_authenticates(self):
+		from dotenv import dotenv_values
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_URL": "http://homebox"}, clear=True), patch("inventory.commands.getpass.getpass", return_value="hb_new-secret"), patch("inventory.homebox.get_entity_types", return_value=[]):
 				result = inventory_cli(["setup", "--secrets"])
-				dotenv = (Path(temporary_directory) / ".env").read_text(encoding="utf-8")
+				dotenv = dotenv_values(Path(temporary_directory) / ".env")
 		self.assertEqual(result, "HomeBox authentication: PASS")
-		self.assertIn("HOMEBOX_API_KEY=hb_new-secret", dotenv)
+		self.assertEqual(dotenv["HOMEBOX_API_KEY"], "hb_new-secret")
 		self.assertNotIn("hb_new-secret", (Path(temporary_directory) / "inventory-config.json").read_text(encoding="utf-8") if (Path(temporary_directory) / "inventory-config.json").exists() else "")

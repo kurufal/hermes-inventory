@@ -25,14 +25,6 @@ if _PLUGIN_DIR not in sys.path:
 
 from inventory.config import get_settings, homebox_api_key, homebox_url, trusted_attachment_roots
 from inventory.media import is_supported_image
-from inventory.uploads import (
-	PendingUploadError,
-	mark_pending_upload_processing,
-	mark_pending_upload_consumed,
-	resolve_pending_upload_batch,
-	release_pending_upload_claim,
-	start_pending_upload_watcher,
-)
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 
@@ -47,10 +39,10 @@ INVENTORY_INGEST_DESCRIPTION = (
 	"my inventory' or 'catalog this item'. Do not call it for generic tests, "
 	"connection or model checks, greetings, casual conversation, development or "
 	"debugging questions, setup or status questions, unrelated requests, or an "
-	"image, attachment, pending upload, or recent upload without an inventory "
-	"request. When clear inventory intent exists, prefer explicit image_paths when "
-	"available. If the user refers to a recent upload and Hermes exposes no usable "
-	"explicit path, use use_pending_upload=true. This tool performs its own vision "
+	"image or attachment without an inventory request. When clear inventory intent "
+	"exists, pass the current request's attachment paths in image_paths. Never scan "
+	"upload directories or guess the newest image. If attachment paths are unavailable, "
+	"report that Hermes did not provide accessible attachments. This tool performs its own vision "
 	"analysis; do not call generic vision analysis first merely to prepare ingestion. "
 	"When an item is classified as an EXACT_DUPLICATE or EXACT_IMAGE_DUPLICATE, report the existing item and "
 	"do not offer a follow-up decision."
@@ -169,7 +161,6 @@ def _stage_images(image_paths, settings=None):
 def inventory_ingest(
 	image_paths=None,
 	vision_client=None,
-	use_pending_upload=False,
 ):
 	"""Ingest one physical item represented by attached photographs."""
 
@@ -179,35 +170,17 @@ def inventory_ingest(
 			"HomeBox is not configured. Run /inventory setup.",
 			status="not_configured",
 		)
-	pending_batch = None
-	using_pending_upload = not image_paths and use_pending_upload is True
-	if using_pending_upload:
-		try:
-			pending_batch = resolve_pending_upload_batch(
-				claim=True, images_dir=settings.hermes_images_dir,
-				state_path=settings.pending_upload_state_path,
-				ttl_seconds=settings.pending_ttl_seconds,
-				retention_seconds=settings.state_retention_seconds,
-				batch_window_seconds=settings.batch_window_seconds,
-			)
-			image_paths = [str(path) for path in pending_batch.image_paths]
-		except PendingUploadError as exc:
-			return _json_error(
-				str(exc),
-				error_stage="pending_upload_resolution",
-				pending_debug=getattr(exc, "debug", {}) or {},
-			)
-	elif not image_paths:
+	if not image_paths:
 		return _json_error(
-			"No image paths were supplied. Provide image_paths or set "
-			"use_pending_upload to true."
+			"No accessible image attachments were supplied by Hermes. "
+			"Provide the current request's attachment paths in image_paths; "
+			"Inventory does not scan for recent uploads.",
+			error_stage="attachment_resolution",
 		)
 
 	try:
 		images = _normalize_image_paths(image_paths, settings)
 	except Exception as exc:
-		if pending_batch is not None:
-			release_pending_upload_claim(pending_batch.batch_id, state_path=pending_batch.state_path)
 		return _json_error(str(exc))
 
 	stage_dir = None
@@ -215,10 +188,6 @@ def inventory_ingest(
 	try:
 		ingest = _load_inventory_ingest()
 		stage_dir = _stage_images(images, settings)
-		if pending_batch is not None:
-			mark_pending_upload_processing(
-				pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path,
-			)
 
 		result = ingest(
 			str(stage_dir), vision_client, settings=settings,
@@ -229,11 +198,6 @@ def inventory_ingest(
 				"Inventory backend returned an unexpected result",
 				backend_result=str(result),
 			)
-		if pending_batch is not None and result.get("durable"):
-			mark_pending_upload_consumed(
-				pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path,
-			)
-
 		result["tool"] = "inventory_ingest"
 		result["input_image_count"] = len(images)
 
@@ -274,8 +238,6 @@ def inventory_ingest(
 		)
 
 	finally:
-		if pending_batch is not None:
-			release_pending_upload_claim(pending_batch.batch_id, state_path=pending_batch.state_path or settings.pending_upload_state_path)
 		if stage_dir is not None:
 			shutil.rmtree(stage_dir, ignore_errors=True)
 
@@ -290,7 +252,6 @@ def register(ctx):
 	import logging
 
 	logger = logging.getLogger("hermes_plugins.hermes_inventory")
-	start_pending_upload_watcher(logger=logger)
 
 	ctx.register_auxiliary_task(
 		"hermes_inventory_vision",
@@ -321,23 +282,16 @@ def register(ctx):
 			"properties": {
 				"image_paths": {
 					"type": "array",
+					"minItems": 1,
 					"items": {
 						"type": "string"
 					},
 					"description": (
-						"Explicit local image paths, when Hermes provides them."
-					),
-				},
-				"use_pending_upload": {
-					"type": "boolean",
-					"description": (
-						"Set this to true only after clear Inventory/HomeBox intent when "
-						"the user refers to a recently uploaded image or physical item but "
-						"Hermes does not expose an explicit image path. Do not use this for "
-						"an upload alone."
+						"Accessible local paths for the images attached to this inventory request."
 					),
 				},
 			},
+			"required": ["image_paths"],
 			"additionalProperties": False,
 		},
 	}
@@ -351,10 +305,6 @@ def register(ctx):
 		return inventory_ingest(
 			params.get("image_paths", []),
 			ctx.llm,
-			use_pending_upload=params.get(
-				"use_pending_upload",
-				False,
-			),
 		)
 
 	update_schema = {
