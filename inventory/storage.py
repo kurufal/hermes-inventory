@@ -36,12 +36,15 @@ def format_asset_id(number: int) -> str:
 	return f"{text[:3]}-{text[3:]}"
 
 
-def reserve_asset_id(settings, requested: str | None = None, external_used_ids=()) -> tuple[str, str]:
+def reserve_asset_id(settings, requested: str | None = None, external_used_ids=(), *, exclude_inventory_id=None) -> tuple[str, str]:
 	with _ASSET_LOCK:
 		used = set()
 		for path in settings.items_dir.glob("*/item.json") if settings.items_dir.exists() else []:
 			try:
-				asset_id = json.loads(path.read_text(encoding="utf-8")).get("asset_id", "")
+				manifest = json.loads(path.read_text(encoding="utf-8"))
+				if exclude_inventory_id is not None and manifest.get("inventory_id") == exclude_inventory_id:
+					continue
+				asset_id = manifest.get("asset_id", "")
 				if _ASSET_RE.fullmatch(str(asset_id)):
 					used.add(str(asset_id))
 			except (OSError, json.JSONDecodeError):

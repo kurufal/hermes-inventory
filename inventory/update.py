@@ -302,6 +302,8 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	manifest["updated_at"] = _now()
 	write_manifest(manifest, settings=settings)
 	record = _record(manifest, images)
+	if operation == "edit" and "notes" in changes_log:
+		record["previous_notes"] = changes_log["notes"]["old"]
 	from inventory.homebox import complete_entity
 	entity_id = manifest.get("homebox", {}).get("entity_id")
 	status = "local_only"

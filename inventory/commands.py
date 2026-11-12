@@ -3,6 +3,7 @@
 import getpass
 import json
 import os
+import re
 from pathlib import Path
 
 import requests
@@ -16,9 +17,10 @@ from inventory.constants import PLUGIN_VERSION
 
 def _help(topic=""):
 	commands = {
-		"": "Commands: setup, status, doctor, refresh, storage, uploads, homebox, backup, recover, version, help",
+		"": "Commands: setup, status, doctor, refresh, sync, storage, uploads, homebox, backup, recover, version, help",
 		"setup": "Usage: /inventory setup [storage <absolute path>|storage default|homebox <url>|secrets|test|help]",
 		"refresh": "Usage: /inventory refresh [--dry-run] [--verbose] [--resolve [<ambiguity-number> <inventory-id>] ]",
+		"sync": "Usage: /inventory sync [--item <asset-id>] [--resolve | --conflicts]. Preview and --conflicts are read-only; --resolve applies only verified nonconflicting field changes.",
 		"storage": "Usage: /inventory storage [show|test|set <absolute path>|reset|help]",
 	}
 	return commands.get(topic, commands[""])
@@ -180,6 +182,31 @@ def _format_refresh(report, *, apply_result=None, verbose=False, resolution_prev
 	return "\n".join(lines)
 
 
+def _format_sync(report, *, resolve=False, conflicts_only=False):
+	lines = ["Hermes Inventory Sync", f"Mode: {'APPLY' if resolve else 'CONFLICTS' if conflicts_only else 'READ-ONLY PREVIEW'}", f"Status: {report['status']}", f"Local: {report.get('local_status', 'unchanged')}", f"Homebox: {report.get('homebox_status', 'not_attempted')}"]
+	if not resolve:
+		lines.append("No changes were made.")
+	if report.get("error"):
+		lines.append(report["error"])
+	for key in (("applied", "conflicts", "skipped") if resolve else ("conflicts", "skipped") if conflicts_only else ("planned", "conflicts", "skipped")):
+		entries = report.get(key, [])
+		lines.append(f"{key.title()}: {len(entries)}")
+		for entry in entries:
+			lines.append(f"- {entry.get('asset_id') or 'no Asset ID'} / {entry.get('inventory_id') or entry.get('entity_id') or 'inventory'}: {entry.get('field', 'availability')} ({entry.get('direction') or entry.get('reason')})")
+			if key == "conflicts":
+				for label in ("baseline", "local", "homebox", "sources"):
+					lines.append(f"  {label}: {json.dumps(entry.get(label), ensure_ascii=True)}")
+			elif key == "planned":
+				lines.append(f"  local: {json.dumps(entry.get('local'))}; homebox: {json.dumps(entry.get('homebox'))}")
+			if entry.get("message"):
+				lines.append(f"  {entry['message']}")
+	if report.get("backup"):
+		lines.append(f"Verified backup: {report['backup']}")
+	if report.get("homebox_status") == "failed" and report.get("local_status") == "saved":
+		lines.append("Local changes are durable; Homebox synchronization is incomplete. Retry /inventory sync after correcting the reported issue.")
+	return "\n".join(lines)
+
+
 def _setup_status(settings):
 	checks = _verification(settings)
 	lines = ["Hermes Inventory Setup", _format_checks(checks)]
@@ -250,7 +277,7 @@ def inventory_command(raw_args="", **kwargs):
 	except ConfigurationError as exc:
 		return f"Inventory configuration error: {exc}"
 	if command in {"help", ""}:
-		return _help()
+		return _help(parts[1].casefold() if len(parts) > 1 else "")
 	if command == "version":
 		return f"hermes-inventory {PLUGIN_VERSION}"
 	if command == "setup":
@@ -286,6 +313,26 @@ def inventory_command(raw_args="", **kwargs):
 		return _help("setup")
 	if command == "status":
 		return _status(settings)
+	if command == "sync":
+		arguments = str(raw_args).split()[1:]
+		if arguments == ["help"]:
+			return _help("sync")
+		item, flags = None, set()
+		while arguments:
+			argument = arguments.pop(0)
+			if argument in flags or argument not in {"--item", "--resolve", "--conflicts"}:
+				return _help("sync")
+			flags.add(argument)
+			if argument == "--item":
+				if not arguments or not re.fullmatch(r"[0-9]{3}-[0-9]{3}", arguments[0]):
+					return _help("sync")
+				item = arguments.pop(0)
+		if {"--resolve", "--conflicts"} <= flags:
+			return _help("sync")
+		from inventory.sync import sync_inventory
+		resolve, conflicts_only = "--resolve" in flags, "--conflicts" in flags
+		report = sync_inventory(settings=settings, resolve=resolve, item=item, conflicts_only=conflicts_only)
+		return _format_sync(report, resolve=resolve, conflicts_only=conflicts_only)
 	if command == "refresh":
 		arguments = ([parts[1]] if len(parts) > 1 else []) + (parts[2].split() if len(parts) > 2 else [])
 		flags = {argument for argument in arguments if argument.startswith("--")}

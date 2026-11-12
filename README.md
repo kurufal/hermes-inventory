@@ -145,12 +145,63 @@ The three tools are `inventory_ingest`, `inventory_search`, and `inventory_updat
 | `/inventory homebox test` | HomeBox connection check |
 | `/inventory refresh` | Read-only reconciliation preview; add `--verbose` for details |
 | `/inventory refresh --resolve` | Apply deterministic local repairs after a verified backup |
+| `/inventory sync` | Read-only three-way field synchronization preview for linked records |
+| `/inventory sync --resolve` | Apply verified, nonconflicting changes after a verified backup |
+| `/inventory sync --item 000-011` | Preview one Asset ID; add `--resolve` to apply safe changes |
+| `/inventory sync --conflicts` | Read-only unresolved conflicts, including values and sources |
 | `/inventory backup` | Create an Inventory backup |
 | `/inventory recover` | Scan recovery state; add `plan` for a recovery plan |
 
 `/inventory refresh --dry-run` is also read-only. For an ambiguous match, inspect `--verbose`, preview with `/inventory refresh --resolve --dry-run <ambiguity-number> <inventory-id>`, then remove `--dry-run` to apply your choice. Resolution revalidates evidence, never guesses a match, and does not modify existing HomeBox items or delete legacy evidence.
 
 Items and originals are saved before HomeBox mutation. Failed syncs remain `pending_homebox_sync`. Backups exclude secrets and runtime state. HomeBox-only adoption keeps existing metadata locally but does not download original photos. Existing item schema versions 1-3 remain readable.
+
+## Field Synchronization
+
+`/inventory refresh` still handles reconciliation, adoption, and recovery. `/inventory sync` only compares records with existing Inventory/Homebox entity links. It never links by name, creates entities, deletes records, renames originals, or runs in the background. Use `/inventory help sync` for syntax. `--item` can also be combined with `--conflicts`; `--conflicts --resolve` is rejected.
+
+Sync compares each current local and Homebox value with its last verified baseline. A change on only one side moves to the other side. Equal simultaneous changes advance the baseline without a remote write. Different simultaneous changes remain conflicts; safe changes to other fields may still apply. Modification timestamps never select a winner. Reports separate `planned`, `applied`, `conflicts`, and `skipped`, plus local and Homebox outcomes. A partial result is not complete synchronization.
+
+### Supported Mappings
+
+| Inventory field | Homebox field | Conditions |
+| --- | --- | --- |
+| `item.name`, `item.description`, `item.manufacturer` | `name`, `description`, `manufacturer` | Text; null and empty text compare equally; line endings normalize |
+| `purchase_price` | `purchasePrice` | Finite decimal values, including numeric strings; null/empty clears are distinct from zero |
+| `purchase_date` | `purchaseDate` | ISO date or midnight UTC date-time; time-bearing values are skipped rather than truncated |
+| `purchase_from` | `purchaseFrom` | Text or cleared text |
+| `location` | `location` / `locationId` | Verified location entity ID or unique catalog name/path; ambiguous or unverifiable references are skipped |
+| `notes` | Freeform portion of `notes` | Plugin metadata is excluded; ambiguous legacy notes require review |
+| `asset_id` | `assetId` | `NNN-NNN`, unique across local records, complete Homebox enumeration, and reservations |
+| `item.category` | `entityType.id` / `entityTypeId` | Only an exact, unique matching non-location entity-type name; generic Homebox `Item` does not map to Inventory `Book` |
+| User `tags` | `tags` / `tagIds` | Existing unambiguous Homebox vocabulary only; case/order differences normalize; system and category tags are protected |
+
+Homebox tags remain Homebox-owned vocabulary: sync does not create them. Identifiers, attributes, condition observations, quantity, attachments, primary-photo selection, warranty/sale fields, and arbitrary custom fields have no bidirectional mapping in this release. They are not imported from generated notes. Remote imports are marked as manual field overrides so reanalysis does not replace them.
+
+### Baseline and Migration
+
+Each manifest may contain `homebox.sync_baseline`, independent of the item schema version:
+
+```json
+{
+	"schema": "hermes-inventory-sync",
+	"version": 1,
+	"inventory_id": "INV-example",
+	"entity_id": "homebox-entity-id",
+	"verified_at": "2026-11-11T00:00:00Z",
+	"fields": {"name": "Example", "purchase_price": "10"}
+}
+```
+
+Existing manifests need no bulk migration. Preview never creates a baseline. On `--resolve`, equal, verified values can establish a per-field baseline; differences without a reliable baseline are explicit conflicts, not an assumed local or remote win. Review and reconcile those values deliberately, then rerun sync. Unknown baseline formats are not overwritten or downgraded; changed identity links are not trusted. Failed or unverified fields retain their previous baseline; successful independent fields can advance.
+
+### Notes and Apply Safety
+
+New generated notes use a plugin-owned block delimited by `<!-- hermes-inventory:metadata:v1:start -->` and `<!-- hermes-inventory:metadata:v1:end -->`. Text outside it is user-owned and can be imported. Legacy notes are only separated when their generated content can be reconstructed exactly; unverifiable legacy content is reported as `notes_migration_required` and is not rewritten. Existing freeform text is preserved. Ordinary `inventory_update` also refuses to overwrite divergent Homebox user notes.
+
+Resolve creates and verifies an Inventory backup, saves a local pre-apply Homebox snapshot in item history, rechecks identities and both states, and rereads Homebox after any write. Baselines advance only for verified agreeing fields. Incomplete entity/tag pagination or unavailable catalogs blocks application. Originals, receipts, provenance, existing reservations, and backup metadata are not overwritten. Existing `pending_homebox_sync` status is not cleared by field-only sync, since attachment/custom-metadata retries still belong to `inventory_update` with `operation="resync"`. That existing tool remains an explicit local-to-Homebox workflow; do not use resync to choose a winner for unresolved field conflicts. Use sync previews before pushing older local state.
+
+**Remote export requires a strong Homebox ETag and server enforcement of `If-Match`.** Without that capability, exports are reported as `conditional_write_unavailable`; verified imports and baseline establishment can still proceed. No timestamp-only or unchecked overwrite fallback is used. API/HTTP errors are sanitized. A timed-out write may have reached Homebox; a reread must verify its value before its baseline advances. Retry sync to recover. Atomic cross-process local editing is not provided: avoid editing the same manifest concurrently; optimistic checks refuse detected local changes.
 
 ## Development and Testing
 

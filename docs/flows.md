@@ -52,3 +52,24 @@ flowchart TD
 ```
 
 Add `--dry-run` to a resolution command to preview without applying changes.
+
+## Synchronize Linked Fields
+
+Sync is separate from refresh. Use `/inventory sync` or `/inventory sync --item 000-011` to preview without writes. `/inventory sync --conflicts` shows both values, the last verified baseline when known, and their sources. Add `--resolve` to a preview command to apply only safe changes; it cannot be combined with `--conflicts`.
+
+```mermaid
+flowchart TD
+    Preview["/inventory sync"] --> Read["Read canonical manifests and complete Homebox catalogs"]
+    Read --> Compare["Compare baseline, Inventory, and linked Homebox fields"]
+    Compare --> Report["Separate planned changes, conflicts, and skipped mappings"]
+    Report --> Choice{"Apply safe changes?"}
+    Choice -->|No| Stop["No filesystem or remote mutations"]
+    Choice -->|Yes| Backup["Create and verify backup"]
+    Backup --> Check["Recheck local state and Homebox identities and revisions"]
+    Check --> Apply["Import safe fields; conditionally export using strong ETag"]
+    Apply --> Verify["Reread Homebox and verify each affected field"]
+    Verify --> Save["Atomically save verified fields and their baselines"]
+    Save --> Result["Report applied, conflicts, skipped, and partial outcomes"]
+```
+
+Missing baselines never authorize choosing a winner. Equal values can establish a baseline on resolve; differing values require deliberate reconciliation. Plugin-delimited generated notes are separate from Homebox user text; ambiguous legacy notes block notes synchronization. Unsupported mappings and servers without conditional-write support are reported, not bypassed. See the [README](../README.md#field-synchronization) for exact field mappings, baseline format, and compatibility limits.

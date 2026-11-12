@@ -13,6 +13,28 @@ from inventory.commands import _format_refresh, inventory_cli, inventory_command
 
 
 class InventoryCommandTests(unittest.TestCase):
+	def test_sync_routes_preview_apply_item_and_conflict_modes(self):
+		cases = [("sync", False, None, False), ("sync --resolve", True, None, False), ("sync --item 000-011", False, "000-011", False), ("sync --item 000-011 --resolve", True, "000-011", False), ("sync --conflicts", False, None, True)]
+		report = {"status": "preview", "local_status": "unchanged", "homebox_status": "not_attempted", "planned": [], "applied": [], "conflicts": [], "skipped": []}
+		for command, resolve, item, conflicts in cases:
+			with self.subTest(command=command), patch("inventory.commands.get_settings", return_value="settings"), patch("inventory.sync.sync_inventory", return_value=report) as sync:
+				output = inventory_command(command)
+				sync.assert_called_once_with(settings="settings", resolve=resolve, item=item, conflicts_only=conflicts)
+				self.assertIn("Mode: APPLY" if resolve else "No changes were made.", output)
+
+	def test_sync_invalid_flags_never_run_synchronization(self):
+		for command in ("sync --force", "sync --resolve --conflicts", "sync --item", "sync --item not-an-asset", "sync --resolve --resolve"):
+			with self.subTest(command=command), patch("inventory.commands.get_settings"), patch("inventory.sync.sync_inventory") as sync:
+				self.assertIn("Usage: /inventory sync", inventory_command(command))
+				sync.assert_not_called()
+
+	def test_sync_conflicts_display_values_and_sources(self):
+		report = {"status": "conflicts", "conflicts": [{"asset_id": "000-011", "inventory_id": "INV-test", "field": "name", "baseline": "Old", "local": "Local", "homebox": "Remote", "reason": "both_sides_changed", "sources": {"local": "Inventory.item.name", "homebox": "Homebox.name"}}]}
+		with patch("inventory.commands.get_settings"), patch("inventory.sync.sync_inventory", return_value=report):
+			output = inventory_command("sync --conflicts")
+		for text in ("000-011", "INV-test", "Old", "Local", "Remote", "Inventory.item.name", "Homebox.name", "both_sides_changed"):
+			self.assertIn(text, output)
+
 	def test_uploads_describes_request_only_mode_without_creating_state(self):
 		with tempfile.TemporaryDirectory() as temporary_directory:
 			with patch.dict(os.environ, {"HERMES_HOME": temporary_directory}, clear=True):

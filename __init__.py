@@ -367,7 +367,7 @@ def register(ctx):
 	)
 	register_command = getattr(ctx, "register_command", None)
 	if callable(register_command):
-		register_command(name="inventory", handler=inventory_command, description="Inventory setup, storage, backup, and recovery commands.")
+		register_command(name="inventory", handler=inventory_command, description="Inventory setup, storage, refresh, field sync, backup, and recovery commands.")
 	register_cli_command = getattr(ctx, "register_cli_command", None)
 	if callable(register_cli_command):
 		from inventory.cli import handle_inventory_cli, setup_inventory_cli

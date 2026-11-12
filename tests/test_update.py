@@ -191,6 +191,20 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertEqual(result["operation"], "resync")
 		self.assertFalse(sync.call_args.kwargs["upload_attachments"])
 
+	def test_old_notes_history_does_not_authorize_overwriting_homebox_notes(self):
+		from inventory.homebox import build_notes, merge_notes
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as sync:
+			update_item("000-011", "edit", {"notes": "Local notes"}, settings=self.settings)
+		self.assertIn("previous_notes", sync.call_args.args[1])
+		def complete(entity_id, record, **kwargs):
+			self.assertNotIn("previous_notes", record)
+			merge_notes(build_notes({"notes": "New Homebox notes"}), record, linked=True)
+		with patch("inventory.homebox.complete_entity", side_effect=complete):
+			result = update_item("000-011", "resync", settings=self.settings)
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(result["local_status"], "saved")
+		self.assertEqual(json.loads((self.item / "item.json").read_text(encoding="utf-8"))["notes"], "Local notes")
+
 	def test_asset_id_edit_requires_valid_unused_value(self):
 		result = update_item("000-011", "edit", {"asset_id": "book1"}, settings=self.settings)
 		self.assertEqual(result["status"], "error")

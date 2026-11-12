@@ -125,11 +125,20 @@ def list_entities():
 
 def list_all_entities(*, max_pages=1000, page_size=100):
 	"""Enumerate HomeBox entities with GET requests only and safe pagination guards."""
+	return _list_all_resources("entities", max_pages=max_pages, page_size=page_size)
+
+
+def list_all_tags(*, max_pages=1000, page_size=100):
+	"""Read an authoritative tag vocabulary before bidirectional synchronization."""
+	return _list_all_resources("tags", max_pages=max_pages, page_size=page_size)
+
+
+def _list_all_resources(resource, *, max_pages, page_size):
 	entities, seen_ids = [], set()
 	page = 1
 	for _ in range(max_pages):
 		response = requests.get(
-			f"{_base_url()}/api/v1/entities",
+			f"{_base_url()}/api/v1/{resource}",
 			headers=auth_headers(),
 			params={"page": page, "pageSize": page_size},
 			timeout=HOMEBOX_TIMEOUT_SECONDS,
@@ -149,7 +158,7 @@ def list_all_entities(*, max_pages=1000, page_size=100):
 		new_count = 0
 		for entity in page_items:
 			if not isinstance(entity, dict) or not entity.get("id"):
-				continue
+				raise HomeBoxEnumerationError("HomeBox enumeration returned an entry without an ID", entities)
 			entity_id = str(entity["id"])
 			if entity_id not in seen_ids:
 				seen_ids.add(entity_id)
@@ -166,8 +175,14 @@ def list_all_entities(*, max_pages=1000, page_size=100):
 		next_page = _positive_int(metadata.get("nextPage") or metadata.get("next_page"))
 		current_page = _positive_int(metadata.get("page") or metadata.get("currentPage")) or page
 		total = _positive_int(metadata.get("total"))
-		has_more = bool(next_page) or (total_pages is not None and current_page < total_pages) or (total is not None and len(entities) < total)
+		if page_items and not new_count:
+			raise HomeBoxEnumerationError("HomeBox enumeration repeated a page", entities)
+		has_more = bool(next_page) or bool(metadata.get("hasMore", metadata.get("has_more", False))) or (total_pages is not None and current_page < total_pages) or (total is not None and len(entities) < total)
+		if total_pages is None and next_page is None and total is None and "hasMore" not in metadata and "has_more" not in metadata:
+			has_more = len(page_items) >= page_size
 		if not has_more:
+			if total is not None and len(entities) != total:
+				raise HomeBoxEnumerationError("HomeBox enumeration did not match its total", entities)
 			return entities
 		if not new_count:
 			raise HomeBoxEnumerationError("HomeBox entity enumeration repeated a page", entities)
@@ -226,7 +241,44 @@ def get_entity(entity_id):
 	return response.json()
 
 
-def build_notes(record):
+def get_entity_snapshot(entity_id):
+	response = requests.get(f"{_base_url()}/api/v1/entities/{entity_id}", headers=auth_headers(), timeout=HOMEBOX_TIMEOUT_SECONDS)
+	response.raise_for_status()
+	return response.json(), response.headers.get("ETag")
+
+
+class SyncWriteBlocked(RuntimeError):
+	"""A synchronization write lacks safe preconditions."""
+
+
+def is_strong_etag(etag):
+	return isinstance(etag, str) and re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]*"', etag) is not None
+
+
+def put_entity_fields(entity_id, changes, *, expected, etag):
+	current, current_etag = get_entity_snapshot(entity_id)
+	if current != expected or current_etag != etag:
+		raise SyncWriteBlocked("remote_changed_since_preview")
+	if not is_strong_etag(etag):
+		raise SyncWriteBlocked("conditional_write_unavailable")
+	payload = {key: current[key] for key in (
+		"name", "description", "quantity", "assetId", "purchasePrice", "purchaseDate", "purchaseFrom",
+		"warrantyExpires", "warrantyDetails", "soldDate", "soldTo", "soldPrice", "soldNotes",
+		"manufacturer", "modelNumber", "serialNumber", "notes", "insured", "archived",
+		"lifetimeWarranty", "syncChildEntityLocations", "fields",
+	) if key in current}
+	payload.update({"id": entity_id, "entityTypeId": current["entityType"]["id"],
+		"tagIds": [tag["id"] for tag in current.get("tags", [])],
+		"locationId": current.get("locationId", (current.get("location") or {}).get("id")),
+	})
+	payload.update(changes)
+	headers = json_headers()
+	headers["If-Match"] = etag
+	response = requests.put(f"{_base_url()}/api/v1/entities/{entity_id}", headers=headers, json=payload, timeout=HOMEBOX_TIMEOUT_SECONDS)
+	response.raise_for_status()
+
+
+def _legacy_notes(record):
 	sections = []
 
 	identifiers = record.get(
@@ -302,6 +354,68 @@ def build_notes(record):
 	)
 
 	return "\n\n".join(sections)
+
+
+NOTES_START = "<!-- hermes-inventory:metadata:v1:start -->"
+NOTES_END = "<!-- hermes-inventory:metadata:v1:end -->"
+
+
+class NotesMigrationRequired(ValueError):
+	"""Notes ownership cannot be established without a user's decision."""
+
+
+def split_notes(notes, record):
+	"""Read user-owned text without guessing the ownership of legacy metadata."""
+	if notes is None:
+		notes = ""
+	if not isinstance(notes, str):
+		raise NotesMigrationRequired("Homebox notes are not text.")
+	notes = notes.replace("\r\n", "\n").replace("\r", "\n")
+	if "<!-- hermes-inventory:metadata:" in notes:
+		if notes.count(NOTES_START) != 1 or notes.count(NOTES_END) != 1:
+			raise NotesMigrationRequired("Notes have ambiguous or unsupported ownership delimiters.")
+		before, rest = notes.split(NOTES_START)
+		if NOTES_END not in rest:
+			raise NotesMigrationRequired("Notes ownership delimiters are out of order.")
+		_, after = rest.split(NOTES_END)
+		if "<!-- hermes-inventory:metadata:" in before + after:
+			raise NotesMigrationRequired("Notes have additional ownership delimiters.")
+		if not before and after.startswith("\n\n"):
+			after = after[2:]
+		return before + after
+	footer = "Inventory metadata generated from local image analysis."
+	if footer not in notes and not notes.startswith(("Identifiers\n", "Condition observations\n", "User notes\n")):
+		return notes
+	user_notes = str(record.get("notes") or "").strip()
+	if notes == _legacy_notes(record):
+		return user_notes
+	if notes.count("User notes\n") == 1 and notes.endswith("\n\n" + footer):
+		candidate = notes.split("User notes\n", 1)[1][:-len("\n\n" + footer)]
+		if notes == _legacy_notes({**record, "notes": candidate}):
+			return candidate
+	if notes == "":
+		return ""
+	raise NotesMigrationRequired("Legacy notes cannot be safely separated; review them before migration.")
+
+
+def build_notes(record, *, user_notes=None):
+	metadata = _legacy_notes({**record, "notes": ""})
+	user_notes = str(record.get("notes") or "") if user_notes is None else user_notes
+	if "<!-- hermes-inventory:metadata:" in user_notes:
+		raise NotesMigrationRequired("User notes contain reserved ownership delimiters.")
+	return f"{NOTES_START}\n{metadata}\n{NOTES_END}" + ("\n\n" + user_notes if user_notes else "")
+
+
+def merge_notes(current_notes, record, *, linked=False):
+	user_notes = split_notes(current_notes, record)
+	local_notes = str(record.get("notes") or "")
+	if "previous_notes" in record and user_notes == str(record["previous_notes"] or ""):
+		return build_notes(record, user_notes=local_notes)
+	if not user_notes and local_notes and (linked or NOTES_START in str(current_notes or "")):
+		raise NotesMigrationRequired("Homebox user notes were cleared; use /inventory sync before restoring local text.")
+	if user_notes and local_notes and user_notes != local_notes:
+		raise NotesMigrationRequired("Local and Homebox user notes differ; use /inventory sync to review the conflict.")
+	return build_notes(record, user_notes=user_notes or local_notes)
 
 
 def create_entity(record):
@@ -430,7 +544,7 @@ def update_entity(entity_id, record):
 				"",
 			)
 		),
-		"notes": build_notes(record),
+		"notes": merge_notes(current.get("notes", ""), record, linked=any(str(field.get("name", "")).casefold() == "inventory item id" for field in current.get("fields", []) if isinstance(field, dict))),
 		"insured": current.get(
 			"insured",
 			False,
