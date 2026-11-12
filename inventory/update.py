@@ -223,6 +223,9 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	record = _record(manifest, images)
 	from inventory.homebox import complete_entity
 	entity_id = manifest.get("homebox", {}).get("entity_id")
+	status = "local_only"
+	homebox_status = "not_attempted"
+	message = "Changes are saved locally. Homebox synchronization was not attempted because no Homebox entity is linked."
 	if entity_id:
 		resume_attachments = operation == "resync" and manifest.get("status") == "pending_homebox_sync" and bool(manifest.get("images"))
 		attachment_sync = dict(manifest.get("homebox", {}).get("attachment_sync", {}))
@@ -238,8 +241,14 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 			manifest.setdefault("homebox", {})["attachment_sync"] = attachment_sync
 			manifest["homebox"]["attachments"] = completed.get("attachments", list(attachment_sync.values()))
 			manifest["status"] = "synced"; manifest["error"] = None
-		except Exception as exc:
-			manifest["status"] = "pending_homebox_sync"; manifest["error"] = str(exc)
+			status = "updated"
+			homebox_status = "synced"
+			message = "Changes are saved locally and synchronized with Homebox."
+		except Exception:
+			status = "partial_success"
+			homebox_status = "failed"
+			message = 'Changes are saved locally but not yet synchronized with Homebox. Retry using inventory_update with operation="resync" and the same asset_id or inventory_id as target.'
+			manifest["status"] = "pending_homebox_sync"; manifest["error"] = message
 	write_manifest(manifest, settings=settings)
 	write_catalog(settings)
-	return {"status": "updated", "durable": True, "operation": operation, "asset_id": manifest.get("asset_id"), "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}
+	return {"status": status, "local_status": "saved", "homebox_status": homebox_status, "message": message, "durable": True, "operation": operation, "asset_id": manifest.get("asset_id"), "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}

@@ -133,12 +133,77 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertIsNone(manifest.get("asset_id"))
 
 	def test_homebox_failure_keeps_local_edit_pending_for_later_resync(self):
-		with patch("inventory.homebox.complete_entity", side_effect=RuntimeError("offline")):
+		with patch("inventory.homebox.complete_entity", side_effect=RuntimeError("secret-token raw API response")):
 			result = update_item("000-011", "edit", {"purchase_price": 14.99}, settings=self.settings)
 		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
-		self.assertEqual(result["status"], "updated")
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(result["local_status"], "saved")
+		self.assertEqual(result["homebox_status"], "failed")
+		self.assertTrue(result["durable"])
+		self.assertEqual(result["asset_id"], "000-011")
+		self.assertEqual(result["inventory_id"], self.item_id)
+		self.assertEqual(result["changes"]["purchase_price"]["new"], 14.99)
+		self.assertIn("saved locally", result["message"])
+		self.assertIn("not yet synchronized", result["message"])
+		self.assertIn("inventory_update", result["message"])
+		self.assertIn('operation="resync"', result["message"])
+		self.assertNotIn("secret-token", json.dumps(result))
+		self.assertNotIn("raw API response", json.dumps(result))
 		self.assertEqual(manifest["status"], "pending_homebox_sync")
 		self.assertEqual(manifest["purchase_price"], 14.99)
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as sync:
+			result = update_item("000-011", "resync", settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(result["status"], "updated")
+		self.assertEqual(result["homebox_status"], "synced")
+		self.assertEqual(manifest["status"], "synced")
+		self.assertIsNone(manifest["error"])
+		self.assertEqual(manifest["purchase_price"], 14.99)
+		self.assertEqual(sync.call_args.args[1]["purchase_price"], 14.99)
+		self.assertTrue(sync.call_args.kwargs["upload_attachments"])
+
+	def test_all_operations_report_local_and_homebox_success(self):
+		raw = {"parse_status": "json_ok", "result": {"physical_description": {"value": "reanalyzed"}}}
+		for operation in ("edit", "reanalyze", "resync"):
+			with self.subTest(operation=operation), patch("inventory.update.run_vision", return_value=(raw, self.item / "vision.json")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+				result = update_item("000-011", operation, {"notes": "saved"}, settings=self.settings)
+				self.assertEqual(result["status"], "updated")
+				self.assertEqual(result["local_status"], "saved")
+				self.assertEqual(result["homebox_status"], "synced")
+				self.assertEqual(result["operation"], operation)
+
+	def test_all_operations_report_sync_failure_without_losing_local_changes(self):
+		raw = {"parse_status": "json_ok", "result": {"physical_description": {"value": "reanalyzed"}}}
+		for operation in ("edit", "reanalyze", "resync"):
+			with self.subTest(operation=operation), patch("inventory.update.run_vision", return_value=(raw, self.item / "vision.json")), patch("inventory.homebox.complete_entity", side_effect=RuntimeError("offline")):
+				result = update_item("000-011", operation, {"notes": "saved"}, settings=self.settings)
+				manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+				self.assertEqual(result["status"], "partial_success")
+				self.assertEqual(result["local_status"], "saved")
+				self.assertEqual(result["homebox_status"], "failed")
+				self.assertEqual(result["operation"], operation)
+				self.assertEqual(manifest["status"], "pending_homebox_sync")
+				self.assertEqual(manifest["notes"], "saved")
+				if operation != "edit":
+					self.assertEqual(manifest["item"]["description"], "reanalyzed")
+
+	def test_unlinked_item_does_not_report_remote_success(self):
+		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		payload["homebox"] = {}
+		payload["status"] = "pending_homebox_sync"
+		(self.item / "item.json").write_text(json.dumps(payload), encoding="utf-8")
+		raw = {"parse_status": "json_ok", "result": {}}
+		for operation in ("edit", "reanalyze", "resync"):
+			with self.subTest(operation=operation), patch("inventory.update.run_vision", return_value=(raw, self.item / "vision.json")), patch("inventory.homebox.complete_entity") as sync:
+				result = update_item("000-011", operation, {"notes": "local only"}, settings=self.settings)
+				self.assertEqual(result["status"], "local_only")
+				self.assertEqual(result["local_status"], "saved")
+				self.assertEqual(result["homebox_status"], "not_attempted")
+				self.assertIn("no Homebox entity is linked", result["message"])
+				sync.assert_not_called()
+				manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+				self.assertEqual(manifest["status"], "pending_homebox_sync")
+				self.assertEqual(manifest["notes"], "local only")
 
 	def test_pending_resync_skips_recorded_attachment_hash_and_persists_completion(self):
 		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8"))

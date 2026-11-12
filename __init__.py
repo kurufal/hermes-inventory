@@ -311,7 +311,11 @@ def register(ctx):
 		"name": "inventory_update",
 		"description": (
 			"Edit, reanalyze, or resync an existing canonical Inventory item only when "
-			"the user clearly intends to change or reprocess that inventory record."
+			"the user clearly intends to change or reprocess that inventory record. "
+			"Report local_status and homebox_status separately: partial_success means changes "
+			"are saved locally but Homebox sync failed; relay the resync recovery message. "
+			"local_only means no Homebox entity is linked and sync was not attempted. "
+			"Only updated with homebox_status=synced indicates complete synchronization."
 		),
 		"parameters": {
 			"type": "object",
