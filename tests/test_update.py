@@ -73,6 +73,118 @@ class InventoryUpdateTests(unittest.TestCase):
 		result = update_item("Cyberpunk", "edit", {"name": "changed"}, settings=self.settings)
 		self.assertEqual(result["status"], "ambiguous")
 
+	def test_invalid_edits_are_rejected_without_any_side_effects(self):
+		cases = [
+			({"tags_add": "Books"}, "tags_add"),
+			({"tags_remove": "Books"}, "tags_remove"),
+			({"tags_add": [""]}, "tags_add[0]"),
+			({"tags_add": [" "]}, "tags_add[0]"),
+			({"tags_add": [5]}, "tags_add[0]"),
+			({"identifiers": []}, "identifiers"),
+			({"identifiers": {"isbn": "123"}}, "identifiers.isbn"),
+			({"identifiers": {"isbn": [123]}}, "identifiers.isbn[0]"),
+			({"identifiers": {"isbn": [["123"]]}}, "identifiers.isbn[0]"),
+			({"identifiers": {" ": []}}, "identifiers"),
+			({"attributes": {}}, "attributes"),
+			({"attributes": ["Format"]}, "attributes[0]"),
+			({"attributes": [{"value": "Hardcover"}]}, "attributes[0].name"),
+			({"attributes": [{"name": "Format"}]}, "attributes[0].value"),
+			({"attributes": [{"name": " ", "value": "Hardcover"}]}, "attributes[0].name"),
+			({"attributes": [{"name": "Format", "value": {"nested": "bad"}}]}, "attributes[0].value"),
+			({"attributes": [{"name": "Format", "value": "Hardcover", "confidence": True}]}, "attributes[0].confidence"),
+			({"attributes": [{"name": "Format", "value": "Hardcover", "source_images": [{}]}]}, "attributes[0].source_images[0]"),
+			({"unsupported": "ignored before"}, "unsupported"),
+			({"publisher": "A", "manufacturer": "B"}, "publisher"),
+			({"physical_description": "A", "description": "B"}, "physical_description"),
+			({"type": "Book", "category": "Electronics"}, "type"),
+			({"asset_id": "invalid"}, "asset_id"),
+			({"asset_id": "000-025\n"}, "asset_id"),
+			({"asset_id": 25}, "asset_id"),
+			({"asset_id": None}, "asset_id"),
+			({"location": []}, "location"),
+			({"location": {"name": []}}, "location.name"),
+			({"location": {"path": "Room"}}, "location.path"),
+			({"location": {"path": [{"name": "Room"}]}}, "location.path[0]"),
+			({"location": {"unknown": "Room"}}, "location.unknown"),
+			({"condition": "good"}, "condition"),
+			({"condition": [{}]}, "condition[0].observation"),
+			({"condition": [{"observation": {"nested": "bad"}}]}, "condition[0].observation"),
+			({"condition": [{"observation": "Good", "source_images": [1]}]}, "condition[0].source_images[0]"),
+			({"purchase_price": True}, "purchase_price"),
+			({"purchase_price": float("nan")}, "purchase_price"),
+			({"purchase_price": float("inf")}, "purchase_price"),
+			({"purchase_price": "not a price"}, "purchase_price"),
+			({"purchase_date": {}}, "purchase_date"),
+			({"name": 42}, "name"),
+			({"notes": ["nested"]}, "notes"),
+		]
+		before = {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
+		for invalid, field in cases:
+			changes = {"name": "Must not rename images", "asset_id": "000-025", **invalid}
+			with self.subTest(invalid=invalid), patch("inventory.homebox.complete_entity") as sync, patch("inventory.homebox.list_all_entities") as entities, patch("inventory.update.canonicalize_images") as rename:
+				result = update_item("000-011", "edit", changes, settings=self.settings)
+				self.assertEqual(result["status"], "error")
+				self.assertEqual(result["field"], field)
+				self.assertTrue(result["error"])
+				sync.assert_not_called()
+				entities.assert_not_called()
+				rename.assert_not_called()
+				self.assertEqual({str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}, before)
+
+	def test_changes_must_be_an_object_but_omitted_changes_remain_valid(self):
+		for changes in ("", "name", [], ["name"], False, 0):
+			with self.subTest(changes=changes), patch("inventory.homebox.complete_entity") as sync:
+				result = update_item("000-011", "edit", changes, settings=self.settings)
+				self.assertEqual(result["status"], "error")
+				self.assertEqual(result["field"], "changes")
+				sync.assert_not_called()
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			self.assertEqual(update_item("000-011", "edit", settings=self.settings)["status"], "updated")
+
+	def test_valid_multifield_edit_preserves_aliases_metadata_and_system_tags(self):
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		manifest["tags"] = [{"name": "Protected", "source": "system"}, {"name": "Old", "source": "user"}]
+		(self.item / "item.json").write_text(json.dumps(manifest), encoding="utf-8")
+		changes = {
+			"name": "New book", "category": "Book", "type": "Book", "publisher": "Publisher", "manufacturer": "Publisher",
+			"physical_description": "Description", "description": "Description", "notes": "User notes",
+			"purchase_price": "12.50", "purchase_from": "Bookshop", "purchase_date": "2026-11-11",
+			"location": {"name": "Shelf", "path": ["Room", "Shelf"]},
+			"condition": [{"observation": "Good", "confidence": 1.0, "source_images": ["old-front.jpg"]}],
+			"identifiers": {"ISBN_13": ["new-isbn"], "serial": []},
+			"attributes": [{"name": "Format", "value": "Hardcover", "confidence": 1.0, "source_images": []}, {"name": "Count", "value": 2}, {"name": "Signed", "value": True}],
+			"asset_id": "000-025", "tags_add": ["New"], "tags_remove": ["Old", "Protected"],
+		}
+		with patch("inventory.config.homebox_url", return_value=""), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			result = update_item("000-011", "edit", changes, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(result["status"], "updated")
+		self.assertEqual(result["homebox_status"], "synced")
+		self.assertEqual(manifest["item"]["manufacturer"], "Publisher")
+		self.assertEqual(manifest["item"]["description"], "Description")
+		self.assertEqual(manifest["purchase_price"], "12.50")
+		self.assertEqual(manifest["location"], changes["location"])
+		self.assertEqual(manifest["item"]["condition"], changes["condition"])
+		self.assertEqual(manifest["identifiers"]["isbn_13"], ["new-isbn"])
+		self.assertEqual(manifest["attributes"], changes["attributes"])
+		self.assertEqual({tag["name"] for tag in manifest["tags"]}, {"New", "Protected"})
+		self.assertEqual(manifest["field_sources"]["manufacturer"], "user")
+		self.assertTrue(all(image["canonical_filename"].startswith("000-025_new-book_") for image in manifest["images"]))
+
+	def test_nullable_and_empty_values_preserve_clearing_and_merge_semantics(self):
+		changes = {"notes": "", "purchase_from": None, "purchase_date": None, "purchase_price": None, "location": {"name": None, "path": []}, "condition": [], "identifiers": {"isbn_13": []}, "attributes": [{"name": "Format", "value": None}], "tags_add": [], "tags_remove": []}
+		with patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+			result = update_item("000-011", "edit", changes, settings=self.settings)
+		manifest = json.loads((self.item / "item.json").read_text(encoding="utf-8"))
+		self.assertEqual(result["status"], "updated")
+		self.assertIsNone(manifest["purchase_price"])
+		self.assertIsNone(manifest["purchase_from"])
+		self.assertEqual(manifest["identifiers"]["isbn_13"], [])
+		self.assertEqual(manifest["attributes"], [{"name": "Format", "value": None}])
+		for location in ("Shelf", None):
+			with self.subTest(location=location), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
+				self.assertEqual(update_item("000-011", "edit", {"location": location}, settings=self.settings)["status"], "updated")
+
 	def test_resync_does_not_run_vision(self):
 		with patch("inventory.update.run_vision", side_effect=AssertionError("vision")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}) as sync:
 			result = update_item("9780000000001", "resync", settings=self.settings)
@@ -80,25 +192,29 @@ class InventoryUpdateTests(unittest.TestCase):
 		self.assertFalse(sync.call_args.kwargs["upload_attachments"])
 
 	def test_asset_id_edit_requires_valid_unused_value(self):
-		with self.assertRaisesRegex(ValueError, "NNN-NNN"):
-			update_item("000-011", "edit", {"asset_id": "book1"}, settings=self.settings)
+		result = update_item("000-011", "edit", {"asset_id": "book1"}, settings=self.settings)
+		self.assertEqual(result["status"], "error")
+		self.assertIn("NNN-NNN", result["error"])
 		other = self.settings.items_dir / "INV-other"; other.mkdir(parents=True)
 		payload = json.loads((self.item / "item.json").read_text(encoding="utf-8")); payload["inventory_id"] = "INV-other"; payload["asset_id"] = "000-025"
 		(other / "item.json").write_text(json.dumps(payload), encoding="utf-8")
-		with self.assertRaisesRegex(ValueError, "already in use"):
-			update_item("000-011", "edit", {"asset_id": "000-025"}, settings=self.settings)
+		result = update_item("000-011", "edit", {"asset_id": "000-025"}, settings=self.settings)
+		self.assertEqual(result["status"], "error")
+		self.assertIn("already in use", result["error"])
 
 	def test_asset_id_edit_fails_closed_when_configured_homebox_unavailable(self):
 		with patch("inventory.config.homebox_url", return_value="http://homebox"), patch("inventory.homebox.list_all_entities", side_effect=RuntimeError("offline")):
-			with self.assertRaisesRegex(RuntimeError, "configured HomeBox"):
-				update_item("000-011", "edit", {"asset_id": "000-026"}, settings=self.settings)
+			result = update_item("000-011", "edit", {"asset_id": "000-026"}, settings=self.settings)
+		self.assertEqual(result["status"], "error")
+		self.assertIn("configured HomeBox", result["error"])
 
 	def test_asset_id_edit_allows_unconfigured_local_only_and_rejects_homebox_collision(self):
 		with patch("inventory.config.homebox_url", return_value=""), patch("inventory.homebox.list_all_entities", side_effect=AssertionError("not configured")), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):
 			update_item("000-011", "edit", {"asset_id": "000-026"}, settings=self.settings)
 		with patch("inventory.config.homebox_url", return_value="http://homebox"), patch("inventory.homebox.list_all_entities", return_value=[{"id": "different", "assetId": "000-027"}]):
-			with self.assertRaisesRegex(ValueError, "HomeBox"):
-				update_item("000-026", "edit", {"asset_id": "000-027"}, settings=self.settings)
+			result = update_item("000-026", "edit", {"asset_id": "000-027"}, settings=self.settings)
+		self.assertEqual(result["status"], "error")
+		self.assertEqual(result["field"], "asset_id")
 
 	def test_edit_renames_images_and_retains_hash_and_provenance(self):
 		with patch("inventory.config.homebox_url", return_value=""), patch("inventory.homebox.complete_entity", return_value={"attachments": []}):

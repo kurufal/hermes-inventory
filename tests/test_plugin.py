@@ -287,6 +287,35 @@ class InventoryPluginHandlerTests(unittest.TestCase):
 			{"inventory_ingest", "inventory_search", "inventory_update"},
 		)
 
+	def test_update_handler_returns_structured_validation_errors_and_field_schema(self):
+		registrations = {}
+
+		class FakeContext:
+			llm = "fake-llm"
+
+			def register_auxiliary_task(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_skill(self, *args, **kwargs):
+				del args, kwargs
+
+			def register_tool(self, **kwargs):
+				registrations[kwargs["name"]] = kwargs
+
+		self.plugin.register(FakeContext())
+		tool = registrations["inventory_update"]
+		schema = tool["schema"]["parameters"]["properties"]["changes"]
+		self.assertFalse(schema["additionalProperties"])
+		self.assertEqual(schema["properties"]["tags_add"]["type"], "array")
+		for alias in ("publisher", "type", "physical_description"):
+			self.assertIn(alias, schema["properties"])
+		with patch.object(self.plugin, "get_settings", return_value=SimpleNamespace()), patch("inventory.homebox.complete_entity") as sync:
+			result = json.loads(tool["handler"]({"target": "000-011", "operation": "edit", "changes": {"tags_add": "Books"}}))
+		self.assertEqual(result["status"], "error")
+		self.assertEqual(result["field"], "tags_add")
+		self.assertIn("array", result["error"])
+		sync.assert_not_called()
+
 	def test_manifest_provides_tools_matches_registered_tool_names(self):
 		registrations = {}
 

@@ -307,6 +307,8 @@ def register(ctx):
 			ctx.llm,
 		)
 
+	from inventory.update import EDIT_CHANGES_SCHEMA
+
 	update_schema = {
 		"name": "inventory_update",
 		"description": (
@@ -322,7 +324,7 @@ def register(ctx):
 			"properties": {
 				"target": {"type": "string", "description": "Asset ID, Inventory ID, strong identifier, or item name."},
 				"operation": {"type": "string", "enum": ["edit", "reanalyze", "resync"]},
-				"changes": {"type": "object", "description": "Factual edits for operation=edit."},
+				"changes": EDIT_CHANGES_SCHEMA,
 			},
 			"required": ["target", "operation"],
 			"additionalProperties": False,

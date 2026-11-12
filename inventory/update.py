@@ -1,12 +1,86 @@
 """Safe edits, reanalysis, and resynchronization of canonical inventory items."""
 
 import json
+import math
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from inventory.ingest import run_vision
 from inventory.normalize import normalize_record, normalize_type
 from inventory.storage import _ASSET_RE, allocate_asset_id, atomic_json_write, canonicalize_images, migrate_manifest, write_catalog, write_manifest
+
+
+_EDIT_ALIASES = {"physical_description": "description", "publisher": "manufacturer", "type": "category"}
+_SCALAR_SCHEMA = {"type": ["string", "number", "boolean", "null"]}
+_METADATA_SCHEMA = {"type": ["string", "number", "boolean", "null", "array"], "items": _SCALAR_SCHEMA}
+_STRING_ARRAY_SCHEMA = {"type": "array", "items": {"type": "string"}}
+EDIT_CHANGES_SCHEMA = {
+	"type": "object",
+	"description": "Factual edits for operation=edit. Invalid edits are rejected without saving or synchronizing. Use empty strings/lists or nullable values to clear supported fields; identifiers and attributes merge with existing entries.",
+	"additionalProperties": False,
+	"properties": {
+		**{field: {"type": ["string", "null"]} for field in ("name", "category", "manufacturer", "description", "notes", "purchase_from", "purchase_date", *_EDIT_ALIASES)},
+		"purchase_price": {"type": ["number", "string", "null"], "pattern": r"^\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\s*$"},
+		"location": {"type": ["string", "object", "null"], "additionalProperties": False, "properties": {
+			**{field: {"type": ["string", "null"]} for field in ("name", "id", "parentId", "description")},
+			"path": _STRING_ARRAY_SCHEMA,
+		}},
+		"condition": {"type": "array", "items": {"type": "object", "required": ["observation"], "properties": {"observation": {"type": "string"}, "confidence": {"type": ["number", "null"]}, "source_images": _STRING_ARRAY_SCHEMA}, "additionalProperties": _METADATA_SCHEMA}},
+		"identifiers": {"type": "object", "propertyNames": {"type": "string", "pattern": r"\S"}, "additionalProperties": _STRING_ARRAY_SCHEMA},
+		"attributes": {"type": "array", "items": {"type": "object", "required": ["name", "value"], "properties": {
+			"name": {"type": "string", "pattern": r"\S"}, "value": _SCALAR_SCHEMA,
+			"confidence": {"type": ["number", "null"]}, "source_images": _STRING_ARRAY_SCHEMA,
+		}, "additionalProperties": _METADATA_SCHEMA}},
+		"asset_id": {"type": "string", "pattern": r"^[0-9]{3}-[0-9]{3}$", "maxLength": 7},
+		**{field: {"type": "array", "items": {"type": "string", "pattern": r"\S"}} for field in ("tags_add", "tags_remove")},
+	},
+}
+
+
+def _validate_edit_value(value, schema, field):
+	types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+	actual = "null" if value is None else "boolean" if isinstance(value, bool) else "string" if isinstance(value, str) else "object" if isinstance(value, dict) else "array" if isinstance(value, list) else "number" if isinstance(value, (int, float)) else "unsupported"
+	if actual not in types:
+		return {"status": "error", "field": field, "error": f"{field} must be {' or '.join(types)}."}
+	if actual == "number" and isinstance(value, float) and not math.isfinite(value):
+		return {"status": "error", "field": field, "error": f"{field} must be a finite number."}
+	if actual == "string" and (len(value) > schema.get("maxLength", len(value)) or "pattern" in schema and not re.search(schema["pattern"], value)):
+		message = "must use NNN-NNN format" if field == "asset_id" else "must be a numeric string" if field == "purchase_price" else "must contain non-whitespace text"
+		return {"status": "error", "field": field, "error": f"{field} {message}."}
+	if actual == "array":
+		for index, entry in enumerate(value):
+			error = _validate_edit_value(entry, schema["items"], f"{field}[{index}]")
+			if error:
+				return error
+	if actual == "object":
+		for required in schema.get("required", []):
+			if required not in value:
+				return {"status": "error", "field": f"{field}.{required}", "error": f"{field} requires {required}."}
+		for key, entry in value.items():
+			path = str(key) if field == "changes" else f"{field}.{key}"
+			if not isinstance(key, str) or not key.strip():
+				return {"status": "error", "field": field, "error": f"{field} keys must be nonempty strings."}
+			child = schema.get("properties", {}).get(key, schema.get("additionalProperties", False))
+			if child is False:
+				return {"status": "error", "field": path, "error": f"Unsupported field {path}. Supported fields: {', '.join(schema.get('properties', {}))}."}
+			error = _validate_edit_value(entry, child, path)
+			if error:
+				return error
+	return None
+
+
+def validate_edit_changes(changes):
+	"""Return a safe validation error, or None, without mutating edit inputs."""
+	if changes is None:
+		return None
+	error = _validate_edit_value(changes, EDIT_CHANGES_SCHEMA, "changes")
+	if error:
+		return error
+	for alias, canonical in _EDIT_ALIASES.items():
+		if alias in changes and canonical in changes and changes[alias] != changes[canonical]:
+			return {"status": "error", "field": alias, "error": f"{alias} conflicts with {canonical}; provide matching values or use only {canonical}."}
+	return None
 
 
 def _now():
@@ -68,9 +142,8 @@ def _apply_changes(manifest, changes):
 	item = manifest.setdefault("item", {})
 	sources = manifest.setdefault("field_sources", {})
 	changes_log = {}
-	aliases = {"physical_description": "description", "publisher": "manufacturer", "type": "category"}
 	for key, value in changes.items():
-		key = aliases.get(key, key)
+		key = _EDIT_ALIASES.get(key, key)
 		if key in {"name", "category", "manufacturer", "description", "condition"}:
 			if key == "category":
 				value = normalize_type(value)
@@ -158,6 +231,10 @@ def _reconcile_image_names(manifest, images):
 
 
 def update_item(target, operation, changes=None, vision_client=None, *, settings):
+	if operation == "edit":
+		error = validate_edit_changes(changes)
+		if error:
+			return error
 	manifest, candidates = resolve_item(target, settings)
 	if manifest is None:
 		if candidates:
@@ -169,7 +246,11 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	raw = None
 	if operation == "edit":
 		if "asset_id" in (changes or {}):
-			_asset_id_available(str(changes["asset_id"]), manifest, settings)
+			try:
+				_asset_id_available(changes["asset_id"], manifest, settings)
+			except (ValueError, RuntimeError) as exc:
+				message = "Asset ID is already in use; choose an unused NNN-NNN value." if isinstance(exc, ValueError) else "Cannot verify Asset ID availability because configured HomeBox state could not be completely enumerated. Retry when Homebox is available."
+				return {"status": "error", "field": "asset_id", "error": message}
 		changes_log = _apply_changes(manifest, changes or {})
 	elif operation == "reanalyze":
 		if not manifest.get("provenance", {}).get("local_originals", bool(manifest.get("images"))):
