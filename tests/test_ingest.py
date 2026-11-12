@@ -1,6 +1,7 @@
 """Tests for ingest orchestration and vision failure diagnostics."""
 
 import json
+import copy
 import shutil
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from inventory.ingest import VisionParseError, ingest, prepare_originals, run_vision
+from inventory.homebox import build_notes
+from inventory.sync import sync_inventory
 
 
 class FakeVisionClient:
@@ -102,6 +105,7 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.settings = SimpleNamespace(
 			persistent_data_dir=self.root / "inventory",
 			items_dir=self.root / "inventory" / "items",
+			backup_dir=self.root / "inventory" / "backups",
 		)
 		self.vision_directories = []
 		self.homebox_directories = []
@@ -137,7 +141,7 @@ class IngestCommittedImageTests(unittest.TestCase):
 		metadata_path.write_text(json.dumps(raw), encoding="utf-8")
 		return raw, metadata_path
 
-	def _run_ingest(self, complete_side_effect=None, duplicate_result=None):
+	def _run_ingest(self, complete_side_effect=None, duplicate_result=None, verification_error=None, remote_changes=None):
 		def create(record):
 			self.homebox_directories.append(Path(record["source_directory"]))
 			return {"id": "entity-1", "assetId": "asset-1", "groupId": "group-1", "entityTypeId": "type-1"}
@@ -152,7 +156,13 @@ class IngestCommittedImageTests(unittest.TestCase):
 			self.assertTrue(all(name.startswith(record["asset_id"] + "_") for name in record["source_images"]))
 			if complete_side_effect:
 				raise complete_side_effect
+			self.remote = {"id": entity_id, "assetId": record["asset_id"], "name": record["name"], "description": record["physical_description"], "manufacturer": record["manufacturer"], "purchasePrice": None, "purchaseDate": "", "purchaseFrom": "", "entityType": {"id": "type-1", "name": "Item"}, "fields": [{"name": "Inventory Item ID", "textValue": record["item_id"]}], "tags": [], "location": None, "notes": build_notes(record), **(remote_changes or {})}
 			return {"entity": {"assetId": "asset-1", "groupId": "group-1", "entityType": {"id": "type-1"}}, "attachments": [{"id": "attachment-1"}, {"id": "attachment-2"}]}
+
+		def snapshot(entity_id):
+			if verification_error:
+				raise verification_error
+			return copy.deepcopy(self.remote), '"revision-1"'
 
 		with patch("inventory.ingest.run_vision", side_effect=self.fake_vision), patch(
 			"inventory.ingest.check_homebox_duplicates",
@@ -161,6 +171,12 @@ class IngestCommittedImageTests(unittest.TestCase):
 			"inventory.ingest.complete_entity", side_effect=complete,
 		), patch(
 			"inventory.homebox.list_all_entities", return_value=[],
+		), patch(
+			"inventory.homebox.get_entity_types", return_value=[{"id": "type-1", "name": "Item", "isLocation": False}],
+		), patch(
+			"inventory.homebox.list_all_tags", return_value=[],
+		), patch(
+			"inventory.homebox.get_entity_snapshot", side_effect=snapshot,
 		):
 			return ingest(self.source, object(), settings=self.settings)
 
@@ -195,6 +211,66 @@ class IngestCommittedImageTests(unittest.TestCase):
 		self.assertTrue(self.vision_directories[0].parent.name.startswith(".tmp-"))
 		self.assertTrue(all(directory == images for directory in self.homebox_directories))
 		self.assertTrue(all(".tmp-" not in str(directory) for directory in self.homebox_directories))
+
+	def test_ingestion_initializes_verified_baseline_and_immediate_homebox_edit_imports(self):
+		result = self._run_ingest()
+		item_root, _, manifest = self._assert_canonical_evidence(result)
+		baseline = manifest["homebox"]["sync_baseline"]
+		self.assertEqual(baseline["fields"]["name"], "Test Camera")
+		self.assertEqual(baseline["fields"]["manufacturer"], "Hermes")
+		self.assertEqual(baseline["version"], 1)
+		self.assertNotIn("category", baseline["fields"])
+		self.assertEqual(manifest["homebox"]["attachments"], [{"id": "attachment-1"}, {"id": "attachment-2"}])
+		self.assertEqual(json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))["sync_tracking"], result["sync_tracking"])
+		self.remote["name"] = "Manually renamed in Homebox"
+		with patch("inventory.homebox.list_all_entities", side_effect=lambda: [copy.deepcopy(self.remote)]), patch("inventory.homebox.get_entity_types", return_value=[{"id": "type-1", "name": "Item", "isLocation": False}]), patch("inventory.homebox.list_all_tags", return_value=[]), patch("inventory.homebox.get_entity_snapshot", side_effect=lambda entity_id: (copy.deepcopy(self.remote), '"revision-2"')), patch("inventory.homebox.put_entity_fields") as put:
+			preview = sync_inventory(settings=self.settings)
+			self.assertTrue(any(action["field"] == "name" and action["direction"] == "import" for action in preview["planned"]))
+			applied = sync_inventory(settings=self.settings, resolve=True)
+			self.assertTrue(any(action["field"] == "name" for action in applied["applied"]))
+			self.assertEqual(json.loads((item_root / "item.json").read_text(encoding="utf-8"))["item"]["name"], "Manually renamed in Homebox")
+			before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.settings.persistent_data_dir.rglob("*") if path.is_file()}
+			self.assertEqual(sync_inventory(settings=self.settings, resolve=True)["applied"], [])
+			self.assertEqual({str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.settings.persistent_data_dir.rglob("*") if path.is_file()}, before)
+			put.assert_not_called()
+
+	def test_verification_outage_preserves_created_item_and_reports_tracking_recovery(self):
+		result = self._run_ingest(verification_error=RuntimeError("private API body"))
+		_, _, manifest = self._assert_canonical_evidence(result)
+		self.assertEqual(result["status"], "created")
+		self.assertTrue(result["created"])
+		self.assertEqual(manifest["status"], "synced")
+		self.assertNotIn("sync_baseline", manifest["homebox"])
+		self.assertEqual(result["sync_tracking"]["status"], "unavailable")
+		self.assertIn("/inventory sync --resolve", result["message"])
+		self.assertNotIn("private API body", json.dumps(result))
+		self.assertTrue(Path(result["receipt_path"]).is_file())
+
+	def test_mismatched_remote_fields_are_never_trusted(self):
+		result = self._run_ingest(remote_changes={"description": "Changed before verification"})
+		_, _, manifest = self._assert_canonical_evidence(result)
+		self.assertNotIn("description", manifest["homebox"]["sync_baseline"]["fields"])
+		self.assertIn("name", manifest["homebox"]["sync_baseline"]["fields"])
+
+	def test_mismatched_inventory_identity_blocks_baseline_initialization(self):
+		result = self._run_ingest(remote_changes={"fields": [{"name": "Inventory Item ID", "textValue": "INV-unrelated"}]})
+		_, _, manifest = self._assert_canonical_evidence(result)
+		self.assertEqual(result["status"], "created")
+		self.assertNotIn("sync_baseline", manifest["homebox"])
+		self.assertEqual(result["sync_tracking"]["status"], "unavailable")
+		self.assertTrue(any(entry["reason"] == "inventory_id_link_mismatch" for entry in result["sync_tracking"]["skipped"]))
+
+	def test_baseline_save_failure_does_not_lose_completed_ingestion(self):
+		with patch("inventory.sync.write_manifest", side_effect=OSError("sensitive filesystem details")):
+			result = self._run_ingest()
+		_, _, manifest = self._assert_canonical_evidence(result)
+		self.assertEqual(result["status"], "created")
+		self.assertTrue(result["durable"])
+		self.assertEqual(result["sync_tracking"]["status"], "unavailable")
+		self.assertNotIn("sync_baseline", manifest["homebox"])
+		self.assertEqual(manifest["status"], "synced")
+		self.assertTrue(Path(result["receipt_path"]).is_file())
+		self.assertNotIn("sensitive filesystem details", json.dumps(result))
 
 	def test_completion_failure_retains_entity_and_canonical_evidence(self):
 		result = self._run_ingest(RuntimeError("attachment upload failed"))

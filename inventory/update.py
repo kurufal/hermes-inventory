@@ -309,7 +309,12 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 	status = "local_only"
 	homebox_status = "not_attempted"
 	message = "Changes are saved locally. Homebox synchronization was not attempted because no Homebox entity is linked."
+	tracking = None
+	completed_successfully = False
 	if entity_id:
+		from inventory.sync import capture_baseline_state, maintain_sync_baseline
+		baseline_before = capture_baseline_state(manifest, settings=settings)
+		blocked = bool(baseline_before and baseline_before["conflicts"])
 		resume_attachments = operation == "resync" and manifest.get("status") == "pending_homebox_sync" and bool(manifest.get("images"))
 		attachment_sync = dict(manifest.get("homebox", {}).get("attachment_sync", {}))
 		def persist_attachment(attachment):
@@ -320,6 +325,8 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 			manifest["status"] = "pending_homebox_sync"
 			write_manifest(manifest, settings=settings)
 		try:
+			if blocked:
+				raise RuntimeError("Homebox fields require conflict review before this update can be synchronized.")
 			completed = complete_entity(entity_id, record, image_directory=images, upload_attachments=resume_attachments, attachment_sync=attachment_sync, on_attachment_uploaded=persist_attachment)
 			manifest.setdefault("homebox", {})["attachment_sync"] = attachment_sync
 			manifest["homebox"]["attachments"] = completed.get("attachments", list(attachment_sync.values()))
@@ -327,11 +334,23 @@ def update_item(target, operation, changes=None, vision_client=None, *, settings
 			status = "updated"
 			homebox_status = "synced"
 			message = "Changes are saved locally and synchronized with Homebox."
+			completed_successfully = True
 		except Exception:
 			status = "partial_success"
 			homebox_status = "failed"
 			message = 'Changes are saved locally but not yet synchronized with Homebox. Retry using inventory_update with operation="resync" and the same asset_id or inventory_id as target.'
+			if blocked:
+				homebox_status = "not_attempted"
+				message = 'Changes are saved locally. Homebox was not overwritten because fields diverge. Review /inventory sync --conflicts before retrying inventory_update with operation="resync".'
+				tracking = {"status": "blocked", "conflicts": baseline_before["conflicts"], "message": message}
 			manifest["status"] = "pending_homebox_sync"; manifest["error"] = message
 	write_manifest(manifest, settings=settings)
+	if completed_successfully:
+		tracking = maintain_sync_baseline(manifest, settings=settings, before=baseline_before)
+		if tracking["status"] != "verified":
+			message += " " + tracking["message"]
 	write_catalog(settings)
-	return {"status": status, "local_status": "saved", "homebox_status": homebox_status, "message": message, "durable": True, "operation": operation, "asset_id": manifest.get("asset_id"), "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}
+	result = {"status": status, "local_status": "saved", "homebox_status": homebox_status, "message": message, "durable": True, "operation": operation, "asset_id": manifest.get("asset_id"), "inventory_id": manifest["inventory_id"], "name": manifest["item"].get("name"), "changes": changes_log}
+	if tracking is not None:
+		result["sync_tracking"] = tracking
+	return result

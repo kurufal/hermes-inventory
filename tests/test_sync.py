@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from inventory.homebox import NotesMigrationRequired, SyncWriteBlocked, _legacy_notes, build_notes, split_notes
-from inventory.sync import sync_inventory
+from inventory.sync import capture_baseline_state, maintain_sync_baseline, sync_inventory
+from inventory.update import update_item
 
 
 class InventorySyncTests(unittest.TestCase):
@@ -70,6 +71,160 @@ class InventorySyncTests(unittest.TestCase):
 		self.assertEqual(baseline["fields"]["purchase_price"], "10")
 		self.assertEqual(baseline["version"], 1)
 		self.assertEqual(sync_inventory(settings=self.settings, resolve=True)["applied"], [])
+
+	def test_lifecycle_helper_initializes_only_verified_equal_fields(self):
+		self.remote["description"] = "Different remote description"
+		manifest = self.load()
+		result = maintain_sync_baseline(manifest, settings=self.settings, initialize=True)
+		self.assertEqual(result["status"], "partial")
+		self.assertIn("name", result["verified_fields"])
+		self.assertNotIn("description", self.load()["homebox"]["sync_baseline"]["fields"])
+		self.assertEqual(self.load()["homebox"]["sync_baseline"]["fields"]["name"], "Book")
+		self.assertEqual(self.load()["history"], [])
+		self.assertEqual(self.load()["status"], "synced")
+
+	def test_lifecycle_helper_never_invents_values_when_verification_fails(self):
+		before = self.path.read_bytes()
+		with patch("inventory.homebox.get_entity_snapshot", side_effect=RuntimeError("private API body")):
+			result = maintain_sync_baseline(self.load(), settings=self.settings, initialize=True)
+		self.assertEqual(result["status"], "unavailable")
+		self.assertEqual(result["updated_fields"], [])
+		self.assertEqual(self.path.read_bytes(), before)
+		self.assertNotIn("private API body", json.dumps(result))
+
+	def test_lifecycle_initialization_preserves_all_existing_manifest_metadata(self):
+		manifest = self.load()
+		manifest["homebox"].update({"attachments": [{"id": "attachment"}], "attachment_sync": {"digest": {"sha256": "digest"}}})
+		manifest["history"] = [{"operation": "original", "changes": {"notes": {"old": "", "new": "User notes"}}}]
+		manifest["provenance"] = {"origin": "native_ingest", "sources": [{"type": "original"}]}
+		manifest["receipt_path"] = "receipts/original.json"
+		self.save(manifest)
+		original = copy.deepcopy(manifest)
+		result = maintain_sync_baseline(manifest, settings=self.settings, initialize=True)
+		self.assertEqual(result["status"], "verified")
+		updated = self.load()
+		updated["homebox"].pop("sync_baseline")
+		self.assertEqual(updated, original)
+
+	def test_missing_prewrite_verification_does_not_trust_a_later_success_response(self):
+		self.seed()
+		baseline = copy.deepcopy(self.load()["homebox"]["sync_baseline"])
+		calls = []
+		def snapshot(entity_id):
+			calls.append(entity_id)
+			if len(calls) == 1:
+				raise RuntimeError("network unavailable")
+			return copy.deepcopy(self.remote), self.etag
+		with patch("inventory.homebox.get_entity_snapshot", side_effect=snapshot), patch("inventory.homebox.complete_entity", side_effect=self._complete_update):
+			result = update_item("000-011", "edit", {"name": "Updated"}, settings=self.settings)
+		self.assertEqual(result["sync_tracking"]["status"], "unavailable")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"], baseline)
+
+	def test_lifecycle_helper_preserves_uncertain_legacy_divergence_after_write(self):
+		manifest = self.load()
+		manifest["item"]["name"] = "Local name"
+		self.save(manifest)
+		before = capture_baseline_state(manifest, settings=self.settings)
+		self.remote["name"] = "Local name"
+		result = maintain_sync_baseline(manifest, settings=self.settings, before=before)
+		self.assertNotIn("name", result["verified_fields"])
+		self.assertNotIn("name", self.load()["homebox"]["sync_baseline"]["fields"])
+
+	def _complete_update(self, entity_id, record, **kwargs):
+		self.assertEqual(entity_id, self.remote["id"])
+		self.remote.update({"name": record["name"], "description": record["physical_description"], "manufacturer": record["manufacturer"], "assetId": record["asset_id"], "notes": build_notes(record)})
+		return {"entity": copy.deepcopy(self.remote), "attachments": []}
+
+	def _assert_verified_update_maintains_baseline(self, operation):
+		self.seed()
+		raw = {"parse_status": "json_ok", "result": {"object_type": {"value": "Book"}, "product_or_title": {"value": "Updated title"}, "manufacturer_or_publisher": {"value": "Publisher"}, "physical_description": {"value": "Description"}}}
+		if operation in {"resync", "reanalyze"}:
+			manifest = self.load()
+			manifest["provenance"] = {"local_originals": True}
+			if operation == "resync":
+				manifest["item"]["name"] = "Updated title"
+				manifest["status"] = "pending_homebox_sync"
+			self.save(manifest)
+		with patch("inventory.homebox.complete_entity", side_effect=self._complete_update), patch("inventory.update.run_vision", return_value=(raw, self.path.parent / "vision.json")):
+			result = update_item("000-011", operation, {"name": "Updated title"}, settings=self.settings)
+		self.assertEqual(result["status"], "updated", result)
+		self.assertEqual(result["sync_tracking"]["status"], "verified", result)
+		self.assertIn("name", result["sync_tracking"]["updated_fields"])
+		self.assertEqual(self.load()["homebox"]["sync_baseline"]["fields"]["name"], "Updated title")
+		before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.settings.persistent_data_dir.rglob("*") if path.is_file()}
+		self.assertEqual(sync_inventory(settings=self.settings, resolve=True)["applied"], [])
+		self.assertEqual({str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in self.settings.persistent_data_dir.rglob("*") if path.is_file()}, before)
+
+	def test_verified_edit_maintains_baseline(self):
+		self._assert_verified_update_maintains_baseline("edit")
+
+	def test_verified_reanalysis_maintains_baseline(self):
+		self._assert_verified_update_maintains_baseline("reanalyze")
+
+	def test_verified_resync_maintains_baseline(self):
+		self._assert_verified_update_maintains_baseline("resync")
+
+	def test_failed_update_write_preserves_previous_baseline_and_local_changes(self):
+		self.seed()
+		baseline = copy.deepcopy(self.load()["homebox"]["sync_baseline"])
+		with patch("inventory.homebox.complete_entity", side_effect=RuntimeError("sensitive response")):
+			result = update_item("000-011", "edit", {"name": "Saved locally"}, settings=self.settings)
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(result["local_status"], "saved")
+		self.assertEqual(result["homebox_status"], "failed")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"], baseline)
+		self.assertEqual(self.load()["item"]["name"], "Saved locally")
+		self.assertNotIn("sensitive response", json.dumps(result))
+
+	def test_success_response_without_verifiable_reread_does_not_advance_baseline(self):
+		self.seed()
+		baseline = copy.deepcopy(self.load()["homebox"]["sync_baseline"])
+		calls = []
+		def snapshot(entity_id):
+			calls.append(entity_id)
+			if len(calls) > 1:
+				raise RuntimeError("private API body")
+			return copy.deepcopy(self.remote), self.etag
+		with patch("inventory.homebox.complete_entity", side_effect=self._complete_update), patch("inventory.homebox.get_entity_snapshot", side_effect=snapshot):
+			result = update_item("000-011", "edit", {"name": "Saved locally"}, settings=self.settings)
+		self.assertEqual(result["sync_tracking"]["status"], "unavailable")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"], baseline)
+		self.assertEqual(self.load()["item"]["name"], "Saved locally")
+		self.assertIn("/inventory sync --resolve", result["message"])
+		self.assertNotIn("private API body", json.dumps(result))
+
+	def test_verified_reread_with_differing_value_keeps_previous_field_baseline(self):
+		self.seed()
+		def complete(*args, **kwargs):
+			return {"entity": {"name": "Pretend success response"}, "attachments": []}
+		with patch("inventory.homebox.complete_entity", side_effect=complete):
+			result = update_item("000-011", "edit", {"name": "Local update"}, settings=self.settings)
+		self.assertEqual(result["sync_tracking"]["status"], "partial")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"]["fields"]["name"], "Book")
+		self.assertNotIn("name", result["sync_tracking"]["verified_fields"])
+
+	def test_update_does_not_overwrite_preexisting_three_way_conflict(self):
+		self.seed()
+		self.remote["name"] = "Manual Homebox name"
+		baseline = copy.deepcopy(self.load()["homebox"]["sync_baseline"])
+		with patch("inventory.homebox.complete_entity") as complete:
+			result = update_item("000-011", "edit", {"name": "Different local name"}, settings=self.settings)
+		complete.assert_not_called()
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(result["homebox_status"], "not_attempted")
+		self.assertEqual(result["sync_tracking"]["status"], "blocked")
+		self.assertEqual(self.load()["item"]["name"], "Different local name")
+		self.assertEqual(self.remote["name"], "Manual Homebox name")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"], baseline)
+
+	def test_legacy_update_does_not_trust_a_missing_baseline_difference(self):
+		with patch("inventory.homebox.complete_entity") as complete:
+			result = update_item("000-011", "edit", {"name": "Local edit of legacy item"}, settings=self.settings)
+		complete.assert_not_called()
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(result["sync_tracking"]["conflicts"][0]["reason"], "baseline_missing_or_unreliable")
+		self.assertNotIn("sync_baseline", self.load()["homebox"])
+		self.assertEqual(self.remote["name"], "Book")
 
 	def test_remote_name_is_imported_and_manual_ownership_preserved(self):
 		self.seed()

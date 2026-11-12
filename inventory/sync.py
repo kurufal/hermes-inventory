@@ -159,6 +159,10 @@ def _baseline(manifest):
 	return baseline["fields"]
 
 
+def _verified_baseline(manifest, fields):
+	return {"schema": BASELINE_SCHEMA, "version": BASELINE_VERSION, "inventory_id": manifest["inventory_id"], "entity_id": manifest["homebox"]["entity_id"], "verified_at": _now(), "fields": fields}
+
+
 def _reliable_baseline(field, value, context):
 	if field == "tags":
 		return isinstance(value, list) and all(isinstance(name, str) and name == name.strip().casefold() for name in value) and value == sorted(set(value))
@@ -231,9 +235,9 @@ def _plan_item(manifest, remote, context, report):
 	return actions
 
 
-def _scan(settings, item):
+def _scan(settings, item, *, inventory_id=None):
 	report = {"status": "preview", "local_status": "unchanged", "homebox_status": "not_attempted", "planned": [], "applied": [], "conflicts": [], "skipped": [], "backup": None}
-	context = {"settings": settings, "local": [], "entities": [], "types": {}, "tags": {}, "locations": {}}
+	context = {"settings": settings, "local": [], "entities": [], "types": {}, "tags": {}, "locations": {}, "snapshots": {}}
 	for path in sorted(settings.items_dir.glob("*/item.json")):
 		try:
 			if path.is_symlink() or path.parent.is_symlink():
@@ -248,7 +252,7 @@ def _scan(settings, item):
 			report["skipped"].append({"reason": "invalid_local_manifest", "inventory_id": path.parent.name})
 	if report["status"] == "error":
 		return report, context, []
-	selected = [entry for entry in context["local"] if item is None or entry["manifest"].get("asset_id") == item]
+	selected = [entry for entry in context["local"] if entry["manifest"]["inventory_id"] == inventory_id] if inventory_id is not None else [entry for entry in context["local"] if item is None or entry["manifest"].get("asset_id") == item]
 	if item is not None and len(selected) != 1:
 		report["skipped"].append({"asset_id": item, "reason": "item_not_found_or_ambiguous"})
 		return report, context, []
@@ -298,6 +302,7 @@ def _scan(settings, item):
 			report["skipped"].append(_entry(manifest, "identity", reason="linked_homebox_entity_unavailable"))
 			report["homebox_status"] = "failed"
 			continue
+		context["snapshots"][manifest["inventory_id"]] = {"remote": remote, "etag": etag}
 		actions = _plan_item(manifest, remote, context, report)
 		baseline = manifest.get("homebox", {}).get("sync_baseline")
 		if isinstance(baseline, dict) and (baseline.get("schema") != BASELINE_SCHEMA or baseline.get("version") != BASELINE_VERSION):
@@ -310,6 +315,75 @@ def _scan(settings, item):
 			report["planned"].extend(actions)
 			plans.append({**entry, "remote": remote, "etag": etag, "actions": actions})
 	return report, context, plans
+
+
+def capture_baseline_state(manifest, *, settings):
+	"""Capture the existing three-way comparison before a local-to-remote write."""
+	try:
+		report, context, _ = _scan(settings, None, inventory_id=manifest["inventory_id"])
+		snapshot = context["snapshots"].get(manifest["inventory_id"])
+		conflicts = [*report["conflicts"], *[action for action in report["planned"] if action["direction"] == "import"]]
+		if report["status"] == "error" or snapshot is None and not conflicts:
+			return None
+		return {"manifest": copy.deepcopy(manifest), "remote": copy.deepcopy(snapshot["remote"]) if snapshot else None, "conflicts": conflicts}
+	except Exception:
+		return None
+
+
+def maintain_sync_baseline(manifest, *, settings, before=None, initialize=False):
+	"""Advance only agreeing verified fields, without trusting a write response."""
+	recovery = "The item remains saved. Bidirectional synchronization tracking could not be fully initialized or updated. Retry /inventory sync --resolve to establish verified equal fields; differing values require review."
+	result = {"status": "unavailable", "verified_fields": [], "updated_fields": [], "skipped": [], "message": recovery}
+	try:
+		report, context, _ = _scan(settings, None, inventory_id=manifest["inventory_id"])
+		snapshot = context["snapshots"].get(manifest["inventory_id"])
+		entry = next((entry for entry in context["local"] if entry["manifest"]["inventory_id"] == manifest["inventory_id"]), None)
+		if report["status"] == "error" or snapshot is None or entry is None or entry["manifest"] != manifest:
+			result["skipped"] = [{"field": problem.get("field", "availability"), "reason": problem["reason"]} for problem in [*report["conflicts"], *report["skipped"]] if problem.get("inventory_id") in (None, manifest["inventory_id"]) and "reason" in problem]
+			return result
+		stored = manifest.get("homebox", {}).get("sync_baseline")
+		if isinstance(stored, dict) and (stored.get("schema") != BASELINE_SCHEMA or stored.get("version") != BASELINE_VERSION):
+			result["skipped"].append({"reason": "unsupported_sync_baseline_format"})
+			return result
+		if not initialize and before is None:
+			return result
+		blocked = set()
+		if not initialize:
+			previous = before["manifest"]
+			if previous["inventory_id"] != manifest["inventory_id"] or previous.get("homebox", {}).get("entity_id") != manifest.get("homebox", {}).get("entity_id"):
+				return result
+			previous_report = {"conflicts": [], "skipped": []}
+			previous_plan = _plan_item(previous, before["remote"], context, previous_report)
+			blocked.update(action["field"] for action in previous_plan if action["direction"] == "import")
+			blocked.update(entry["field"] for entry in [*previous_report["conflicts"], *previous_report["skipped"]])
+		fields = dict(_baseline(manifest))
+		for field in _FIELDS:
+			try:
+				if field in blocked:
+					raise MappingUnavailable("preexisting_divergence_or_unverified_field")
+				local, remote = _values(field, manifest, snapshot["remote"], context)
+				if local != remote:
+					raise MappingUnavailable("local_homebox_values_differ")
+				result["verified_fields"].append(field)
+				if field not in fields or fields[field] != local:
+					fields[field] = local
+					result["updated_fields"].append(field)
+			except (ValueError, TypeError, KeyError, AttributeError) as exc:
+				reason = str(exc) if isinstance(exc, MappingUnavailable) else "notes_migration_required" if isinstance(exc, homebox.NotesMigrationRequired) else "invalid_field_shape"
+				result["skipped"].append({"field": field, "reason": reason})
+		if result["updated_fields"]:
+			updated = copy.deepcopy(manifest)
+			updated["homebox"]["sync_baseline"] = _verified_baseline(manifest, fields)
+			if entry["path"].read_bytes() != entry["data"]:
+				return {**result, "status": "unavailable", "updated_fields": []}
+			write_manifest(updated, settings=settings)
+			manifest["homebox"]["sync_baseline"] = updated["homebox"]["sync_baseline"]
+		result["status"] = "partial" if result["skipped"] else "verified"
+		if not result["skipped"]:
+			result["message"] = "Bidirectional synchronization tracking is verified."
+		return result
+	except Exception:
+		return {**result, "status": "unavailable", "updated_fields": []}
 
 
 def _import_value(field, value, manifest, context):
@@ -413,7 +487,7 @@ def _apply_item(plan, context, report):
 		if plan["path"].read_bytes() != plan["data"]:
 			raise homebox.SyncWriteBlocked("local_changed_during_apply")
 		if applied:
-			manifest["homebox"]["sync_baseline"] = {"schema": BASELINE_SCHEMA, "version": BASELINE_VERSION, "inventory_id": manifest["inventory_id"], "entity_id": entity_id, "verified_at": _now(), "fields": fields}
+			manifest["homebox"]["sync_baseline"] = _verified_baseline(manifest, fields)
 			manifest["updated_at"] = _now()
 			manifest.setdefault("history", []).append({"timestamp": _now(), "operation": "sync", "source": "homebox", "changes": [{"field": action["field"], "direction": action["direction"], "value": action["value"]} for action in applied]})
 		if failures and payload:

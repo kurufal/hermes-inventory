@@ -170,7 +170,12 @@ def ingest(source_directory, vision_client, *, settings=None):
 			return result
 		result = {"status": "created", "created": True, "durable": True, "item_id": item_id, "inventory_id": item_id, "homebox_entity_id": entity_id, "asset_id": record["asset_id"], "name": record.get("name"), "category": record.get("category"), "manufacturer": record.get("manufacturer"), "duplicate_check": duplicate_result, "attachments": completed.get("attachments", [])}
 		homebox_entity = completed.get("entity", {})
-		write_manifest(build_manifest(item_id, record, raw, final_images_dir, status="synced", homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": homebox_entity.get("groupId"), "entity_type": homebox_entity.get("entityType", {}).get("id") or created.get("entityTypeId"), "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "fields": homebox_entity.get("fields"), "tags": homebox_entity.get("tags"), "location": homebox_entity.get("location"), "attachments": completed.get("attachments", []), "attachment_sync": attachment_sync}, previous=previous_manifest), settings=settings)
+		manifest = build_manifest(item_id, record, raw, final_images_dir, status="synced", homebox={"entity_id": entity_id, "asset_id": result["asset_id"], "collection_id": homebox_entity.get("groupId"), "entity_type": homebox_entity.get("entityType", {}).get("id") or created.get("entityTypeId"), "last_synced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "fields": homebox_entity.get("fields"), "tags": homebox_entity.get("tags"), "location": homebox_entity.get("location"), "attachments": completed.get("attachments", []), "attachment_sync": attachment_sync}, previous=previous_manifest)
+		write_manifest(manifest, settings=settings)
+		from inventory.sync import maintain_sync_baseline
+		result["sync_tracking"] = maintain_sync_baseline(manifest, settings=settings, initialize=True)
+		if result["sync_tracking"]["status"] != "verified":
+			result["message"] = "The item was created and saved locally. " + result["sync_tracking"]["message"]
 		write_catalog(settings)
 		result["receipt_path"] = str(save_receipt(item_id, result, settings))
 		return result
