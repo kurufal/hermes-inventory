@@ -65,6 +65,15 @@ def _verification(settings):
 			from inventory.homebox import get_entity_types
 			get_entity_types()
 			checks.append(("PASS", "HomeBox authentication", ""))
+			from inventory.homebox import remote_write_diagnostics
+			compatibility = remote_write_diagnostics()
+			checks.extend([
+				("PASS" if compatibility["connectivity"] == "available" else "WARN", "HomeBox entity connectivity", compatibility["connectivity"]),
+				("PASS" if compatibility["entity_api"] == "compatible_read_shape" else "WARN", "HomeBox entity API compatibility", compatibility["entity_api"] + "; full write schema unverified"),
+				("PASS" if compatibility["strong_etag"] == "available" else "WARN", "HomeBox strong ETag", compatibility["strong_etag"]),
+				("WARN", "HomeBox conditional-write enforcement", compatibility["conditional_write_enforcement"] + "; GET cannot verify If-Match enforcement"),
+				("WARN", "HomeBox remote exports", compatibility["message"]),
+			])
 		except Exception as exc:
 			checks.append(("FAIL", "HomeBox authentication", _authentication_failure(exc)))
 	else:

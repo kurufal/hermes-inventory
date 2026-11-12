@@ -1,4 +1,5 @@
 import tempfile
+import copy
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -50,16 +51,79 @@ class NotesOwnershipTests(unittest.TestCase):
 
 
 class ConditionalSyncWriteTests(unittest.TestCase):
+	def _entity(self):
+		return {"id": "entity-1", "name": "Old", "description": "Keep description", "assetId": "000-011", "entityType": {"id": "item"}, "parent": {"id": "shelf"}, "tags": [{"id": "tag"}], "fields": [{"id": "field-id", "name": "Custom", "textValue": "Keep"}], "notes": "Manual notes", "purchasePrice": "12.50", "purchaseFrom": "Store", "purchaseDate": "2026-01-01", "warrantyExpires": "2030-01-01", "warrantyDetails": "Full warranty", "insured": True, "archived": False, "quantity": 2, "soldNotes": "Sale notes"}
+
+	def test_known_put_mapping_preserves_existing_values_and_field_ids(self):
+		from inventory.homebox import _entity_put_payload
+		current = self._entity()
+		before = copy.deepcopy(current)
+		payload = _entity_put_payload(current, {"name": "New"})
+		for key in ("assetId", "notes", "purchasePrice", "purchaseFrom", "purchaseDate", "warrantyExpires", "warrantyDetails", "insured", "archived", "quantity", "soldNotes", "fields"):
+			self.assertEqual(payload[key], current[key])
+		self.assertEqual(payload["fields"][0]["id"], "field-id")
+		self.assertEqual(payload["parentId"], "shelf")
+		self.assertEqual(payload["entityTypeId"], "item")
+		self.assertEqual(payload["tagIds"], ["tag"])
+		self.assertNotIn("parent", payload)
+		self.assertNotIn("entityType", payload)
+		self.assertNotIn("tags", payload)
+		self.assertEqual(current, before)
+
+	def test_unverified_preservation_and_unsupported_location_write_are_blocked(self):
+		from inventory.homebox import SyncWriteBlocked, _entity_put_payload
+		current = self._entity()
+		with self.assertRaisesRegex(SyncWriteBlocked, "unsupported_entity_write_field"):
+			_entity_put_payload(current, {"locationId": "shelf"})
+		current.pop("parent")
+		with self.assertRaisesRegex(SyncWriteBlocked, "entity_put_preservation_unverified"):
+			_entity_put_payload(current, {"name": "New"})
+
+	def test_precondition_rejections_do_not_retry_unconditionally(self):
+		from inventory.homebox import SyncWriteBlocked, put_entity_fields
+		current = self._entity()
+		capability = {"remote_exports": True, "conditional_write_enforcement": "verified", "put_preservation": "verified"}
+		for status in (409, 412, 428):
+			with self.subTest(status=status), patch("inventory.homebox.remote_write_compatibility", return_value=capability), patch("inventory.homebox.get_entity_snapshot", return_value=(current, '"revision-1"')), patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.put") as put:
+				put.return_value.status_code = status
+				with self.assertRaisesRegex(SyncWriteBlocked, f"remote_precondition_rejected_{status}"):
+					put_entity_fields("entity-1", {"name": "New"}, expected=current, etag='"revision-1"')
+				put.assert_called_once()
+				self.assertEqual(put.call_args.kwargs["headers"]["If-Match"], '"revision-1"')
+
+	def test_success_response_cannot_hide_untouched_field_loss(self):
+		from inventory.homebox import SyncWriteBlocked, put_entity_fields
+		current = self._entity()
+		capability = {"remote_exports": True, "conditional_write_enforcement": "verified", "put_preservation": "verified"}
+		for damaged in ({"fields": []}, {"tags": []}, {"assetId": ""}, {"parent": None}, {"notes": ""}, {"warrantyDetails": ""}, {"fields": [{"id": "different-id", "name": "Custom", "textValue": "Keep"}]}):
+			with self.subTest(damaged=damaged), patch("inventory.homebox.remote_write_compatibility", return_value=capability), patch("inventory.homebox.get_entity_snapshot", side_effect=[(current, '"revision-1"'), ({**current, "name": "New", **damaged}, '"revision-2"')]), patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.put") as put:
+				put.return_value.status_code = 200
+				with self.assertRaisesRegex(SyncWriteBlocked, "remote_untouched_field_changed"):
+					put_entity_fields("entity-1", {"name": "New"}, expected=current, etag='"revision-1"')
+
+	def test_server_that_would_ignore_if_match_is_never_probed_automatically(self):
+		from inventory.homebox import SyncWriteBlocked, put_entity_fields
+		current = self._entity()
+		with patch("inventory.homebox.get_entity_snapshot", return_value=(current, '"strong"')), patch("inventory.homebox.requests.put") as put:
+			put.return_value.status_code = 200
+			with self.assertRaisesRegex(SyncWriteBlocked, "conditional_enforcement_unverified"):
+				put_entity_fields("entity-1", {"name": "New"}, expected=current, etag='"strong"')
+			put.assert_not_called()
+
 	def test_put_preserves_unrelated_values_and_sends_if_match(self):
 		from inventory.homebox import put_entity_fields
-		current = {"id": "entity-1", "name": "Old", "notes": "Manual notes", "entityType": {"id": "item"}, "tags": [{"id": "tag"}], "location": {"id": "shelf"}, "fields": [{"name": "Custom", "textValue": "Keep"}], "soldNotes": "Do not remove"}
-		with patch("inventory.homebox.get_entity_snapshot", return_value=(current, '"revision-1"')), patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.put") as put:
+		current = {"id": "entity-1", "name": "Old", "assetId": "000-011", "notes": "Manual notes", "entityType": {"id": "item"}, "tags": [{"id": "tag"}], "parent": {"id": "shelf"}, "fields": [{"id": "custom-id", "name": "Custom", "textValue": "Keep"}], "soldNotes": "Do not remove"}
+		capability = {"remote_exports": True, "conditional_write_enforcement": "verified", "put_preservation": "verified"}
+		with patch("inventory.homebox.remote_write_compatibility", return_value=capability), patch("inventory.homebox.get_entity_snapshot", side_effect=[(current, '"revision-1"'), ({**current, "name": "New"}, '"revision-2"')]), patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.put") as put:
 			put_entity_fields("entity-1", {"name": "New"}, expected=current, etag='"revision-1"')
 		payload = put.call_args.kwargs["json"]
 		self.assertEqual(payload["notes"], "Manual notes")
 		self.assertEqual(payload["fields"], current["fields"])
 		self.assertEqual(payload["soldNotes"], "Do not remove")
-		self.assertEqual(payload["locationId"], "shelf")
+		self.assertEqual(payload["parentId"], "shelf")
+		self.assertNotIn("locationId", payload)
+		self.assertEqual(payload["assetId"], "000-011")
+		self.assertEqual(payload["tagIds"], ["tag"])
 		self.assertEqual(put.call_args.kwargs["headers"]["If-Match"], '"revision-1"')
 
 	def test_missing_or_weak_etag_blocks_put(self):
@@ -77,8 +141,50 @@ class ConditionalSyncWriteTests(unittest.TestCase):
 				put_entity_fields("entity-1", {"name": "Local"}, expected={"id": "entity-1", "name": "Original"}, etag='"old"')
 			put.assert_not_called()
 
+	def test_strong_etag_does_not_establish_if_match_enforcement(self):
+		from inventory.homebox import SyncWriteBlocked, put_entity_fields, remote_write_compatibility
+		current = {"id": "entity-1", "fields": [], "tags": [], "entityType": {"id": "item"}, "parent": None}
+		capability = remote_write_compatibility(current, '"strong"')
+		self.assertEqual(capability["strong_etag"], "available")
+		self.assertEqual(capability["conditional_write_enforcement"], "unknown")
+		self.assertFalse(capability["remote_exports"])
+		with patch("inventory.homebox.get_entity_snapshot", return_value=(current, '"strong"')), patch("inventory.homebox.requests.put") as put:
+			with self.assertRaisesRegex(SyncWriteBlocked, "conditional_enforcement_unverified"):
+				put_entity_fields("entity-1", {"name": "New"}, expected=current, etag='"strong"')
+			put.assert_not_called()
+
 
 class AuthenticationTests(unittest.TestCase):
+	def test_compatibility_diagnostics_are_get_only_and_do_not_enable_exports(self):
+		from inventory.homebox import remote_write_diagnostics
+		entity = {"id": "entity-1", "parent": None, "entityType": {"id": "item"}, "fields": [], "tags": []}
+		with patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.get") as get, patch("inventory.homebox.requests.put") as put, patch("inventory.homebox.requests.patch") as patch_request, patch("inventory.homebox.requests.post") as post, patch("inventory.homebox.requests.delete") as delete:
+			get.return_value.json.side_effect = [[entity], entity]
+			get.return_value.headers = {"ETag": '"strong"'}
+			result = remote_write_diagnostics()
+			self.assertEqual(get.call_count, 2)
+			for mutation in (put, patch_request, post, delete):
+				mutation.assert_not_called()
+		self.assertEqual(result["connectivity"], "available")
+		self.assertEqual(result["strong_etag"], "available")
+		self.assertEqual(result["conditional_write_enforcement"], "unknown")
+		self.assertEqual(result["put_preservation"], "unverified")
+		self.assertEqual(result["patch_support"], "unverified")
+		self.assertFalse(result["remote_exports"])
+
+	def test_diagnostics_report_missing_weak_etags_and_redact_outages(self):
+		from inventory.homebox import remote_write_diagnostics
+		entity = {"id": "entity-1", "entityType": {"id": "item"}, "fields": [], "tags": []}
+		for etag, state in ((None, "missing_or_invalid"), ('W/"weak"', "weak"), ('"strong"', "available")):
+			with self.subTest(etag=etag), patch("inventory.homebox.list_all_entities", return_value=[entity]), patch("inventory.homebox.get_entity_snapshot", return_value=(entity, etag)):
+				result = remote_write_diagnostics()
+				self.assertEqual(result["strong_etag"], state)
+				self.assertFalse(result["remote_exports"])
+		with patch("inventory.homebox.list_all_entities", side_effect=RuntimeError("private API body and credentials")):
+			result = remote_write_diagnostics()
+		self.assertEqual(result["connectivity"], "unavailable")
+		self.assertNotIn("credentials", str(result))
+
 	def test_complete_tag_pagination_and_repeated_terminal_pages(self):
 		from inventory.homebox import HomeBoxEnumerationError, list_all_tags
 		with patch("inventory.homebox.homebox_url", return_value="http://homebox"), patch("inventory.homebox.homebox_api_key", return_value="test-only"), patch("inventory.homebox.requests.get") as get:

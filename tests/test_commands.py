@@ -13,6 +13,19 @@ from inventory.commands import _format_refresh, inventory_cli, inventory_command
 
 
 class InventoryCommandTests(unittest.TestCase):
+	def setUp(self):
+		compatibility = {"connectivity": "available", "entity_api": "compatible_read_shape", "strong_etag": "available", "conditional_write_enforcement": "unknown", "remote_exports": False, "message": "Remote exports are blocked; conditional enforcement and the write contract remain unverified."}
+		mock = patch("inventory.homebox.remote_write_diagnostics", return_value=compatibility)
+		mock.start()
+		self.addCleanup(mock.stop)
+
+	def test_setup_diagnostics_distinguish_etag_from_verified_enforcement(self):
+		with tempfile.TemporaryDirectory() as temporary_directory, patch.dict(os.environ, {"HERMES_HOME": temporary_directory, "HOMEBOX_URL": "http://homebox", "HOMEBOX_API_KEY": "hb_test-only"}, clear=True), patch("inventory.homebox.get_entity_types", return_value=[]):
+			output = inventory_command("setup test")
+		for text in ("entity connectivity", "entity API compatibility", "strong ETag", "conditional-write enforcement", "unknown", "remote exports", "blocked", "write schema unverified"):
+			self.assertIn(text, output)
+		self.assertNotIn("hb_test-only", output)
+
 	def test_sync_routes_preview_apply_item_and_conflict_modes(self):
 		cases = [("sync", False, None, False), ("sync --resolve", True, None, False), ("sync --item 000-011", False, "000-011", False), ("sync --item 000-011 --resolve", True, "000-011", False), ("sync --conflicts", False, None, True)]
 		report = {"status": "preview", "local_status": "unchanged", "homebox_status": "not_attempted", "planned": [], "applied": [], "conflicts": [], "skipped": []}

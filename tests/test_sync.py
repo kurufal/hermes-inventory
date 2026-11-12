@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from inventory.homebox import NotesMigrationRequired, SyncWriteBlocked, _legacy_notes, build_notes, split_notes
+from inventory.homebox import NotesMigrationRequired, SyncWriteBlocked, _legacy_notes, build_notes, is_strong_etag, remote_write_compatibility, split_notes
 from inventory.sync import capture_baseline_state, maintain_sync_baseline, sync_inventory
 from inventory.update import update_item
 
@@ -23,13 +23,14 @@ class InventorySyncTests(unittest.TestCase):
 		self.path.parent.mkdir(parents=True)
 		self.manifest = {"schema": "hermes-inventory-item", "schema_version": 3, "inventory_id": "INV-test", "asset_id": "000-011", "status": "synced", "item": {"name": "Book", "description": "Description", "manufacturer": "Publisher", "category": "Book", "condition": []}, "identifiers": {}, "attributes": [], "images": [], "tags": [], "notes": "User notes", "location": {"name": None, "path": []}, "purchase_price": "10.00", "purchase_from": "Shop", "purchase_date": "2026-01-01", "homebox": {"entity_id": "entity-1"}, "history": [], "field_sources": {}}
 		self.save(self.manifest)
-		self.remote = {"id": "entity-1", "assetId": "000-011", "name": "Book", "description": "Description", "manufacturer": "Publisher", "entityType": {"id": "book", "name": "Book"}, "fields": [{"name": "Inventory Item ID", "textValue": "INV-test"}], "tags": [], "location": None, "purchasePrice": 10, "purchaseFrom": "Shop", "purchaseDate": "2026-01-01T00:00:00Z", "notes": build_notes({"notes": "User notes"}), "quantity": 1}
+		self.remote = {"id": "entity-1", "assetId": "000-011", "name": "Book", "description": "Description", "manufacturer": "Publisher", "entityType": {"id": "book", "name": "Book"}, "fields": [{"name": "Inventory Item ID", "textValue": "INV-test"}], "tags": [], "parent": None, "location": None, "purchasePrice": 10, "purchaseFrom": "Shop", "purchaseDate": "2026-01-01T00:00:00Z", "notes": build_notes({"notes": "User notes"}), "quantity": 1}
 		self.etag = '"1"'
 		self.puts = []
 		self.types = [{"id": "book", "name": "Book", "isLocation": False}]
 		self.tags = []
 		self.entities = [self.remote]
 		for target, kwargs in (
+			("inventory.homebox.remote_write_compatibility", {"side_effect": lambda entity, etag: {"remote_exports": True, "conditional_write_enforcement": "verified", "put_preservation": "verified"} if is_strong_etag(etag) else remote_write_compatibility(entity, etag)}),
 			("inventory.homebox.list_all_entities", {"side_effect": lambda: copy.deepcopy(self.entities)}),
 			("inventory.homebox.get_entity_types", {"side_effect": lambda: copy.deepcopy(self.types)}),
 			("inventory.homebox.list_all_tags", {"side_effect": lambda: copy.deepcopy(self.tags)}),
@@ -56,8 +57,9 @@ class InventorySyncTests(unittest.TestCase):
 			self.remote["entityType"] = next(entry for entry in self.types if entry["id"] == changes["entityTypeId"])
 		if "tagIds" in changes:
 			self.remote["tags"] = [tag for tag in self.tags if tag["id"] in changes["tagIds"]]
-		if "locationId" in changes:
-			self.remote["location"] = next((entry for entry in self.entities if entry["id"] == changes["locationId"]), None)
+		if "parentId" in changes:
+			self.remote["parent"] = next((entry for entry in self.entities if entry["id"] == changes["parentId"]), None)
+			self.remote["location"] = copy.deepcopy(self.remote["parent"])
 		self.etag = '"2"'
 
 	def seed(self):
@@ -414,7 +416,7 @@ class InventorySyncTests(unittest.TestCase):
 		self.types.extend([{"id": "electronics", "name": "Electronics", "isLocation": False}, {"id": "location", "name": "Location", "isLocation": True}])
 		location = {"id": "shelf", "name": "Shelf", "entityType": self.types[2]}
 		self.entities.append(location)
-		self.remote.update({"location": location, "entityType": self.types[1]})
+		self.remote.update({"location": location, "parent": location, "entityType": self.types[1]})
 		result = sync_inventory(settings=self.settings, resolve=True)
 		self.assertEqual(result["status"], "updated", result)
 		self.assertEqual(self.load()["location"], {"id": "shelf", "name": "Shelf", "path": []})
@@ -684,7 +686,7 @@ class InventorySyncTests(unittest.TestCase):
 		self.save(manifest)
 		result = sync_inventory(settings=self.settings, resolve=True)
 		self.assertEqual(result["status"], "updated", result)
-		self.assertEqual(self.puts[-1], {"assetId": "000-020", "locationId": "shelf", "entityTypeId": "electronics"})
+		self.assertEqual(self.puts[-1], {"assetId": "000-020", "parentId": "shelf", "entityTypeId": "electronics"})
 		self.assertEqual(self.load()["homebox"]["entity_type"], "electronics")
 		self.assertEqual(self.load()["homebox"]["asset_id"], "000-020")
 		self.assertEqual(sync_inventory(settings=self.settings, resolve=True)["planned"], [])
@@ -700,3 +702,49 @@ class InventorySyncTests(unittest.TestCase):
 		result = sync_inventory(settings=self.settings, resolve=True, item="000-011")
 		self.assertEqual(result["conflicts"][0]["reason"], "asset_id_collision_local")
 		self.assertFalse(self.puts)
+
+	def test_import_only_when_strong_etag_enforcement_is_unverified(self):
+		self.seed()
+		manifest = self.load()
+		manifest["item"]["description"] = "Local export pending"
+		self.save(manifest)
+		self.remote["name"] = "Homebox import"
+		with patch("inventory.homebox.remote_write_compatibility", side_effect=remote_write_compatibility):
+			preview = sync_inventory(settings=self.settings)
+			self.assertTrue(any(action["field"] == "name" and action["direction"] == "import" for action in preview["planned"]))
+			self.assertTrue(any(action["field"] == "description" and action["reason"] == "conditional_enforcement_unverified" for action in preview["skipped"]))
+			result = sync_inventory(settings=self.settings, resolve=True)
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(self.load()["item"]["name"], "Homebox import")
+		self.assertEqual(self.load()["item"]["description"], "Local export pending")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"]["fields"]["description"], "Description")
+		self.assertFalse(self.puts)
+
+	def test_untouched_remote_field_loss_prevents_baseline_advancement(self):
+		self.seed()
+		manifest = self.load()
+		baseline = copy.deepcopy(manifest["homebox"]["sync_baseline"])
+		manifest["item"]["name"] = "Local export"
+		self.save(manifest)
+		def damaging_write(*args, **kwargs):
+			self.put(*args, **kwargs)
+			self.remote["purchaseFrom"] = ""
+		with patch("inventory.homebox.put_entity_fields", side_effect=damaging_write):
+			result = sync_inventory(settings=self.settings, resolve=True)
+		self.assertTrue(any(entry["reason"] == "remote_untouched_field_changed" for entry in result["skipped"]))
+		self.assertEqual(self.load()["homebox"]["sync_baseline"], baseline)
+		self.assertEqual(result["homebox_status"], "failed")
+		self.assertEqual(self.load()["item"]["name"], "Local export")
+
+	def test_precondition_rejection_still_allows_verified_independent_import(self):
+		self.seed()
+		manifest = self.load()
+		manifest["item"]["description"] = "Local export"
+		self.save(manifest)
+		self.remote["name"] = "Remote import"
+		with patch("inventory.homebox.put_entity_fields", side_effect=SyncWriteBlocked("remote_precondition_rejected_412")):
+			result = sync_inventory(settings=self.settings, resolve=True)
+		self.assertEqual(result["status"], "partial_success")
+		self.assertEqual(self.load()["item"]["name"], "Remote import")
+		self.assertEqual(self.load()["homebox"]["sync_baseline"]["fields"]["description"], "Description")
+		self.assertTrue(any(entry["reason"] == "remote_precondition_rejected_412" for entry in result["skipped"]))

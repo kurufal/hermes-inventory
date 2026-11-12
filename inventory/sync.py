@@ -125,11 +125,16 @@ def _values(field, manifest, remote, context):
 		convert = _price if field == "purchase_price" else _date if field == "purchase_date" else _text
 		return convert(local), convert(other)
 	if field == "location":
-		if "location" not in remote and "locationId" not in remote:
+		if "parent" in remote or "parentId" in remote:
+			other = remote.get("parent")
+			if other is None and remote.get("parentId"):
+				other = {"id": remote["parentId"]}
+		elif "location" in remote or "locationId" in remote:
+			other = remote.get("location")
+			if other is None and remote.get("locationId"):
+				other = {"id": remote["locationId"]}
+		else:
 			raise MappingUnavailable("homebox_field_missing")
-		other = remote.get("location")
-		if other is None and remote.get("locationId"):
-			other = {"id": remote["locationId"]}
 		return _location(local, context["locations"]), _location(other, context["locations"])
 	if field == "category":
 		remote_type = remote.get("entityType")
@@ -311,6 +316,11 @@ def _scan(settings, item, *, inventory_id=None):
 		if not homebox.is_strong_etag(etag):
 			report["skipped"].extend({**action, "reason": "conditional_write_unavailable", "message": "Export was not attempted. The server must provide a strong ETag and enforce If-Match."} for action in actions if action["direction"] == "export")
 			actions = [action for action in actions if action["direction"] != "export"]
+		else:
+			compatibility = homebox.remote_write_compatibility(remote, etag)
+			if not compatibility["remote_exports"] or compatibility["conditional_write_enforcement"] != "verified" or compatibility["put_preservation"] != "verified":
+				report["skipped"].extend({**action, "reason": compatibility["reason"], "message": compatibility["message"]} for action in actions if action["direction"] == "export")
+				actions = [action for action in actions if action["direction"] != "export"]
 		if actions:
 			report["planned"].extend(actions)
 			plans.append({**entry, "remote": remote, "etag": etag, "actions": actions})
@@ -409,7 +419,7 @@ def _export_values(actions, manifest, remote, context):
 		elif field == "category":
 			payload["entityTypeId"] = value
 		elif field == "location":
-			payload["locationId"] = value
+			payload["parentId"] = value
 		elif field == "tags":
 			protected = _protected_tags(manifest)
 			payload["tagIds"] = list(dict.fromkeys([tag["id"] for tag in remote["tags"] if tag["name"].casefold() in protected or tag["name"].startswith("Type: ")] + [context["tags"][name]["id"] for name in value]))
@@ -442,9 +452,9 @@ def _apply_item(plan, context, report):
 			try:
 				homebox.put_entity_fields(entity_id, payload, expected=remote, etag=etag)
 			except homebox.SyncWriteBlocked as exc:
-				if str(exc) != "conditional_write_unavailable":
+				if str(exc) not in {"conditional_write_unavailable", "conditional_enforcement_unverified", "entity_put_preservation_unverified", "remote_precondition_rejected_409", "remote_precondition_rejected_412", "remote_precondition_rejected_428"}:
 					raise
-				blocked_reason = "conditional_write_unavailable"
+				blocked_reason = str(exc)
 			except Exception:
 				write_failed = True
 		try:
@@ -453,6 +463,12 @@ def _apply_item(plan, context, report):
 			verified = None
 		if verified is not None and (verified.get("id") != entity_id or entity_field_values(verified, "Inventory Item ID") not in (set(), {manifest["inventory_id"].casefold()})):
 			verified = None
+		if payload and verified is not None and blocked_reason is None:
+			try:
+				homebox.verify_entity_preservation(remote, verified, payload, check_changes=False)
+			except homebox.SyncWriteBlocked as exc:
+				report["skipped"].append(_entry(manifest, "remote_preservation", reason=str(exc), message="Remote changes were not accepted as synchronized because untouched state could not be verified. No baseline was advanced for this item; review the saved pre-write snapshot."))
+				verified = None
 		fields = dict(_baseline(manifest))
 		applied, failures = [], []
 		for action in actions:

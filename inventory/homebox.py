@@ -1,5 +1,6 @@
 """HomeBox entity, field, and attachment integration."""
 
+import copy
 import re
 from pathlib import Path
 
@@ -255,27 +256,111 @@ def is_strong_etag(etag):
 	return isinstance(etag, str) and re.fullmatch(r'"[\x21\x23-\x7e\x80-\xff]*"', etag) is not None
 
 
+def remote_write_compatibility(entity, etag):
+	"""GET evidence cannot establish conditional enforcement or PUT completeness."""
+	compatible = isinstance(entity, dict) and isinstance(entity.get("id"), str) and isinstance(entity.get("fields"), list) and isinstance(entity.get("tags"), list) and isinstance(entity.get("entityType"), dict)
+	strong = is_strong_etag(etag)
+	reason = "entity_api_unverified" if not compatible else "conditional_write_unavailable" if not strong else "conditional_enforcement_unverified"
+	return {
+		"connectivity": "available", "entity_api": "compatible_read_shape" if compatible else "unverified",
+		"strong_etag": "available" if strong else "weak" if isinstance(etag, str) and etag.startswith("W/") else "missing_or_invalid",
+		"conditional_write_enforcement": "unknown", "put_preservation": "unverified", "patch_support": "unverified",
+		"remote_exports": False, "reason": reason,
+		"message": "Remote exports are blocked: a strong ETag alone does not prove If-Match enforcement, and the complete entity write contract is unverified. Read-only comparisons and verified imports remain available.",
+	}
+
+
+def remote_write_diagnostics():
+	"""Inspect an entity through GET only; never probe write enforcement."""
+	try:
+		entities = list_all_entities()
+		if not entities:
+			return {**remote_write_compatibility({}, None), "entity_api": "no_entity_available", "message": "Remote exports are blocked. No entity is available for read-only schema/ETag inspection; conditional enforcement and the write contract remain unverified."}
+		entity, etag = get_entity_snapshot(entities[0]["id"])
+		return remote_write_compatibility(entity, etag)
+	except Exception:
+		return {**remote_write_compatibility({}, None), "connectivity": "unavailable", "reason": "entity_api_unavailable", "message": "Entity API inspection failed. Check Homebox connectivity and authentication. Remote exports remain blocked; no write probe was attempted."}
+
+
+_ENTITY_PUT_SCALARS = (
+	"name", "description", "quantity", "assetId", "purchasePrice", "purchaseDate", "purchaseFrom",
+	"warrantyExpires", "warrantyDetails", "soldDate", "soldTo", "soldPrice", "soldNotes",
+	"manufacturer", "modelNumber", "serialNumber", "notes", "insured", "archived",
+	"lifetimeWarranty", "syncChildEntityLocations",
+)
+
+
+def _entity_put_payload(current, changes):
+	"""Translate only known write fields, never a verbatim entity GET response."""
+	if set(changes) - {*_ENTITY_PUT_SCALARS, "parentId", "entityTypeId", "tagIds", "fields"}:
+		raise SyncWriteBlocked("unsupported_entity_write_field")
+	try:
+		if not isinstance(current["fields"], list) or not isinstance(current["tags"], list):
+			raise ValueError
+		parent = current.get("parent")
+		if "parent" not in current and "parentId" not in current:
+			raise ValueError
+		parent_id = current["parentId"] if "parentId" in current else parent["id"] if parent is not None else None
+		if "parentId" in current and "parent" in current and parent_id != (parent["id"] if parent is not None else None):
+			raise ValueError
+		payload = {key: copy.deepcopy(current[key]) for key in _ENTITY_PUT_SCALARS if key in current}
+		payload.update({"id": current["id"], "entityTypeId": current["entityType"]["id"], "parentId": parent_id,
+			"tagIds": [tag["id"] for tag in current["tags"]], "fields": copy.deepcopy(current["fields"])})
+		payload.update(copy.deepcopy(changes))
+		return payload
+	except (KeyError, TypeError, ValueError):
+		raise SyncWriteBlocked("entity_put_preservation_unverified") from None
+
+
+def verify_entity_preservation(expected, actual, changes, *, check_changes=True):
+	"""Check untouched known state and custom-field IDs after a remote write."""
+	if not isinstance(actual, dict) or actual.get("id") != expected.get("id"):
+		raise SyncWriteBlocked("remote_identity_verification_failed")
+	before = _entity_put_payload(expected, {})
+	after = _entity_put_payload(actual, {})
+	for key, value in before.items():
+		if key in changes:
+			continue
+		if key == "tagIds":
+			preserved = sorted(value) == sorted(after.get(key, []))
+		elif key == "fields":
+			preserved = sorted(value, key=lambda field: repr(sorted(field.items()))) == sorted(after.get(key, []), key=lambda field: repr(sorted(field.items())))
+		else:
+			preserved = key in after and after[key] == value
+		if not preserved:
+			raise SyncWriteBlocked("remote_untouched_field_changed")
+	for key, value in changes.items():
+		if not check_changes:
+			break
+		actual_value = after.get(key)
+		matches = sorted(value) == sorted(actual_value or []) if key == "tagIds" else actual_value == value
+		if not matches:
+			raise SyncWriteBlocked("remote_intended_field_mismatch")
+	for key, value in expected.items():
+		if key in {"location", "locationId"} and "parentId" in changes:
+			continue
+		if key not in {*_ENTITY_PUT_SCALARS, "id", "parent", "parentId", "entityType", "tags", "fields", "updatedAt", "updated_at", "lastUpdated"} and actual.get(key) != value:
+			raise SyncWriteBlocked("remote_unmapped_field_changed")
+
+
 def put_entity_fields(entity_id, changes, *, expected, etag):
 	current, current_etag = get_entity_snapshot(entity_id)
 	if current != expected or current_etag != etag:
 		raise SyncWriteBlocked("remote_changed_since_preview")
 	if not is_strong_etag(etag):
 		raise SyncWriteBlocked("conditional_write_unavailable")
-	payload = {key: current[key] for key in (
-		"name", "description", "quantity", "assetId", "purchasePrice", "purchaseDate", "purchaseFrom",
-		"warrantyExpires", "warrantyDetails", "soldDate", "soldTo", "soldPrice", "soldNotes",
-		"manufacturer", "modelNumber", "serialNumber", "notes", "insured", "archived",
-		"lifetimeWarranty", "syncChildEntityLocations", "fields",
-	) if key in current}
-	payload.update({"id": entity_id, "entityTypeId": current["entityType"]["id"],
-		"tagIds": [tag["id"] for tag in current.get("tags", [])],
-		"locationId": current.get("locationId", (current.get("location") or {}).get("id")),
-	})
-	payload.update(changes)
+	compatibility = remote_write_compatibility(current, etag)
+	if not compatibility["remote_exports"] or compatibility["conditional_write_enforcement"] != "verified" or compatibility["put_preservation"] != "verified":
+		raise SyncWriteBlocked(compatibility["reason"])
+	payload = _entity_put_payload(current, changes)
 	headers = json_headers()
 	headers["If-Match"] = etag
 	response = requests.put(f"{_base_url()}/api/v1/entities/{entity_id}", headers=headers, json=payload, timeout=HOMEBOX_TIMEOUT_SECONDS)
+	if response.status_code in {409, 412, 428}:
+		raise SyncWriteBlocked(f"remote_precondition_rejected_{response.status_code}")
 	response.raise_for_status()
+	verified, _ = get_entity_snapshot(entity_id)
+	verify_entity_preservation(current, verified, changes)
 
 
 def _legacy_notes(record):
